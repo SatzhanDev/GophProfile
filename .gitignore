@@ -1,0 +1,25 @@
+# Binaries
+/bin/
+/dist/
+
+# Go
+*.exe
+*.test
+*.out
+vendor/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Logs
+*.log
