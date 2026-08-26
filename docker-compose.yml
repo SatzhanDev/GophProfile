@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gophprofile
+      POSTGRES_PASSWORD: gophprofile
+      POSTGRES_DB: gophprofile
+    ports:
+      # Слева — порт хоста, справа — порт внутри контейнера.
+      # 5434 снаружи, чтобы не конфликтовать ни со стандартным 5432
+      # (может быть занят локальным PostgreSQL), ни с 5433 (в моём случае
+      # там уже сидел Postgres от другого проекта — gophkeeper-pg).
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gophprofile"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

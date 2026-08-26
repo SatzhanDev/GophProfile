@@ -11,13 +11,23 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
+
 	"github.com/SatzhanDev/GophProfile/internal/api"
 	"github.com/SatzhanDev/GophProfile/internal/config"
+	"github.com/SatzhanDev/GophProfile/pkg/postgres"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	// .env — необязательный файл для локальной разработки. В докере/проде
+	// переменные окружения обычно задаются напрямую, файла там нет —
+	// поэтому ошибку "файл не найден" не считаем фатальной, а просто логируем.
+	if err := godotenv.Load(); err != nil {
+		slog.Debug("no .env file found, using process environment", "error", err)
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -25,7 +35,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	router := api.NewRouter(cfg)
+	// Отдельный контекст для операций старта (подключение к БД, миграции) —
+	// он не связан с ctx graceful shutdown, который появится чуть ниже.
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelStartup()
+
+	dbPool, err := postgres.NewPool(startupCtx, cfg.Database.DSN())
+	if err != nil {
+		slog.Error("failed to connect to postgres", "error", err)
+		os.Exit(1)
+	}
+	defer dbPool.Close()
+
+	if err := postgres.RunMigrations(cfg.MigrationsPath, cfg.Database.DSN()); err != nil {
+		slog.Error("failed to run migrations", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("migrations applied")
+
+	router := api.NewRouter(cfg, dbPool)
 
 	srv := &http.Server{
 		Addr:              cfg.Server.Address(),

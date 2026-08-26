@@ -26,14 +26,23 @@ k8s/            — манифесты Kubernetes
 tests/          — интеграционные тесты
 ```
 
-## Запуск (инкремент 1)
+## Запуск
 
 ```
+cp .env.example .env      # при желании поправить под себя
+docker compose up -d postgres
 go mod tidy
 go run ./cmd/server
 ```
 
-Проверка: `curl http://localhost:8080/health`
+При старте сервер сам подключается к PostgreSQL и применяет миграции из `migrations/`.
+Файл `.env` в корне проекта подхватывается автоматически (через `godotenv`) — можно
+менять значения там, не трогая переменные окружения шелла. Если `.env` нет —
+приложение не падает, а просто использует дефолты/переменные окружения процесса
+(так и должно быть в докере/проде, где `.env`-файла обычно не бывает).
+
+Проверка: `curl http://localhost:8080/health` — должно вернуться
+`{"status":"ok","components":{"postgres":{"status":"ok"}}}`.
 
 ## Переменные окружения
 
@@ -43,11 +52,18 @@ go run ./cmd/server
 | SERVER_HOST                | 0.0.0.0       | адрес, на котором слушает сервер |
 | SERVER_PORT                | 8080          | порт HTTP-сервера              |
 | SERVER_SHUTDOWN_TIMEOUT    | 10s           | таймаут graceful shutdown      |
+| DB_HOST                    | localhost     | адрес PostgreSQL               |
+| DB_PORT                    | 5434          | порт PostgreSQL (не 5432/5433 — чтобы не конфликтовать с уже запущенными локальными Postgres) |
+| DB_USER                    | gophprofile   | пользователь PostgreSQL        |
+| DB_PASSWORD                | gophprofile   | пароль PostgreSQL              |
+| DB_NAME                    | gophprofile   | имя базы данных                |
+| DB_SSLMODE                 | disable       | режим SSL для подключения      |
+| MIGRATIONS_PATH            | migrations    | путь к папке с SQL-миграциями  |
 
 ## План инкрементов
 
 1. Скелет проекта, конфиг, `/health` — **готово**
-2. Домен + PostgreSQL (миграции, репозиторий аватарок)
+2. Домен + PostgreSQL (миграции, репозиторий аватарок) — **готово**
 3. Интеграция с S3/MinIO
 4. REST API: загрузка, получение, удаление аватарок
 5. RabbitMQ: публикация событий после загрузки

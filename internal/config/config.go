@@ -20,11 +20,32 @@ func (s ServerConfig) Address() string {
 	return fmt.Sprintf("%s:%d", s.Host, s.Port)
 }
 
+// DatabaseConfig содержит настройки подключения к PostgreSQL.
+type DatabaseConfig struct {
+	Host     string
+	Port     int
+	User     string
+	Password string
+	Name     string
+	SSLMode  string
+}
+
+// DSN собирает connection string в формате, который понимают
+// и pgx (пул соединений), и golang-migrate (раннер миграций).
+func (d DatabaseConfig) DSN() string {
+	return fmt.Sprintf(
+		"postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		d.User, d.Password, d.Host, d.Port, d.Name, d.SSLMode,
+	)
+}
+
 // Config — корневая структура конфигурации всего приложения.
-// В следующих инкрементах сюда добавятся секции Database, S3, Broker.
+// В следующих инкрементах сюда добавятся секции S3, Broker.
 type Config struct {
-	Env    string
-	Server ServerConfig
+	Env            string
+	Server         ServerConfig
+	Database       DatabaseConfig
+	MigrationsPath string
 }
 
 // Load читает конфигурацию из переменных окружения.
@@ -41,6 +62,11 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	dbPort, err := getEnvInt("DB_PORT", 5434)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Env: getEnv("APP_ENV", "development"),
 		Server: ServerConfig{
@@ -48,6 +74,15 @@ func Load() (*Config, error) {
 			Port:            port,
 			ShutdownTimeout: shutdownTimeout,
 		},
+		Database: DatabaseConfig{
+			Host:     getEnv("DB_HOST", "localhost"),
+			Port:     dbPort,
+			User:     getEnv("DB_USER", "gophprofile"),
+			Password: getEnv("DB_PASSWORD", "gophprofile"),
+			Name:     getEnv("DB_NAME", "gophprofile"),
+			SSLMode:  getEnv("DB_SSLMODE", "disable"),
+		},
+		MigrationsPath: getEnv("MIGRATIONS_PATH", "migrations"),
 	}
 
 	return cfg, nil

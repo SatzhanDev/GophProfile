@@ -13,7 +13,9 @@ import (
 )
 
 // NewRouter собирает chi.Router со всеми middleware и маршрутами сервиса.
-func NewRouter(cfg *config.Config) http.Handler {
+// db нужен здесь только для health-чека; когда появятся хендлеры аватарок,
+// сигнатура получит дополнительные зависимости (репозиторий, S3-клиент и т.д.).
+func NewRouter(cfg *config.Config, db handlers.Pinger) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -22,7 +24,7 @@ func NewRouter(cfg *config.Config) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
-	r.Get("/health", handlers.NewHealthHandler().ServeHTTP)
+	r.Get("/health", handlers.NewHealthHandler(db).ServeHTTP)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// В следующих инкрементах здесь появятся:
