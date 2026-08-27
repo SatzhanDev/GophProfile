@@ -30,19 +30,23 @@ tests/          — интеграционные тесты
 
 ```
 cp .env.example .env      # при желании поправить под себя
-docker compose up -d postgres
+docker compose up -d postgres minio
 go mod tidy
 go run ./cmd/server
 ```
 
-При старте сервер сам подключается к PostgreSQL и применяет миграции из `migrations/`.
+При старте сервер подключается к PostgreSQL и применяет миграции из `migrations/`,
+а также подключается к MinIO и создаёт бакет из `S3_BUCKET`, если его ещё нет.
 Файл `.env` в корне проекта подхватывается автоматически (через `godotenv`) — можно
 менять значения там, не трогая переменные окружения шелла. Если `.env` нет —
 приложение не падает, а просто использует дефолты/переменные окружения процесса
 (так и должно быть в докере/проде, где `.env`-файла обычно не бывает).
 
 Проверка: `curl http://localhost:8080/health` — должно вернуться
-`{"status":"ok","components":{"postgres":{"status":"ok"}}}`.
+`{"status":"ok","components":{"postgres":{"status":"ok"},"s3":{"status":"ok"}}}`.
+
+Веб-консоль MinIO (посмотреть загруженные файлы глазами) — http://localhost:9001,
+логин/пароль `minioadmin`/`minioadmin`.
 
 ## Переменные окружения
 
@@ -58,13 +62,18 @@ go run ./cmd/server
 | DB_PASSWORD                | gophprofile   | пароль PostgreSQL              |
 | DB_NAME                    | gophprofile   | имя базы данных                |
 | DB_SSLMODE                 | disable       | режим SSL для подключения      |
+| S3_ENDPOINT                | localhost:9000| адрес S3-совместимого хранилища (без схемы http/https) |
+| S3_ACCESS_KEY              | minioadmin    | access key                     |
+| S3_SECRET_KEY              | minioadmin    | secret key                     |
+| S3_BUCKET                  | avatars       | бакет, где хранятся файлы аватарок |
+| S3_USE_SSL                 | false         | использовать ли HTTPS до хранилища |
 | MIGRATIONS_PATH            | migrations    | путь к папке с SQL-миграциями  |
 
 ## План инкрементов
 
 1. Скелет проекта, конфиг, `/health` — **готово**
 2. Домен + PostgreSQL (миграции, репозиторий аватарок) — **готово**
-3. Интеграция с S3/MinIO
+3. Интеграция с S3/MinIO — **готово**
 4. REST API: загрузка, получение, удаление аватарок
 5. RabbitMQ: публикация событий после загрузки
 6. Worker: генерация миниатюр, обработка удаления

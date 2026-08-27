@@ -15,7 +15,9 @@ import (
 
 	"github.com/SatzhanDev/GophProfile/internal/api"
 	"github.com/SatzhanDev/GophProfile/internal/config"
+	"github.com/SatzhanDev/GophProfile/internal/handlers"
 	"github.com/SatzhanDev/GophProfile/pkg/postgres"
+	"github.com/SatzhanDev/GophProfile/pkg/s3"
 )
 
 func main() {
@@ -53,7 +55,22 @@ func main() {
 	}
 	slog.Info("migrations applied")
 
-	router := api.NewRouter(cfg, dbPool)
+	s3Client, err := s3.NewClient(
+		startupCtx,
+		cfg.S3.Endpoint, cfg.S3.AccessKey, cfg.S3.SecretKey, cfg.S3.Bucket, cfg.S3.UseSSL,
+	)
+	if err != nil {
+		slog.Error("failed to connect to s3", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("s3 bucket ready", "bucket", cfg.S3.Bucket)
+
+	healthChecks := map[string]handlers.Pinger{
+		"postgres": dbPool,
+		"s3":       s3Client,
+	}
+
+	router := api.NewRouter(cfg, healthChecks)
 
 	srv := &http.Server{
 		Addr:              cfg.Server.Address(),

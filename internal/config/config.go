@@ -39,12 +39,22 @@ func (d DatabaseConfig) DSN() string {
 	)
 }
 
+// S3Config содержит настройки подключения к S3-совместимому хранилищу (MinIO).
+type S3Config struct {
+	Endpoint  string
+	AccessKey string
+	SecretKey string
+	Bucket    string
+	UseSSL    bool
+}
+
 // Config — корневая структура конфигурации всего приложения.
-// В следующих инкрементах сюда добавятся секции S3, Broker.
+// В следующих инкрементах сюда добавится секция Broker.
 type Config struct {
 	Env            string
 	Server         ServerConfig
 	Database       DatabaseConfig
+	S3             S3Config
 	MigrationsPath string
 }
 
@@ -67,6 +77,11 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	s3UseSSL, err := getEnvBool("S3_USE_SSL", false)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Env: getEnv("APP_ENV", "development"),
 		Server: ServerConfig{
@@ -81,6 +96,13 @@ func Load() (*Config, error) {
 			Password: getEnv("DB_PASSWORD", "gophprofile"),
 			Name:     getEnv("DB_NAME", "gophprofile"),
 			SSLMode:  getEnv("DB_SSLMODE", "disable"),
+		},
+		S3: S3Config{
+			Endpoint:  getEnv("S3_ENDPOINT", "localhost:9000"),
+			AccessKey: getEnv("S3_ACCESS_KEY", "minioadmin"),
+			SecretKey: getEnv("S3_SECRET_KEY", "minioadmin"),
+			Bucket:    getEnv("S3_BUCKET", "avatars"),
+			UseSSL:    s3UseSSL,
 		},
 		MigrationsPath: getEnv("MIGRATIONS_PATH", "migrations"),
 	}
@@ -105,6 +127,18 @@ func getEnvInt(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("invalid value for %s: %w", key, err)
 	}
 	return i, nil
+}
+
+func getEnvBool(key string, fallback bool) (bool, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("invalid value for %s: %w", key, err)
+	}
+	return b, nil
 }
 
 func getEnvDuration(key string, fallback time.Duration) (time.Duration, error) {
