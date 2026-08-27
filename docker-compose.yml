@@ -33,6 +33,21 @@ services:
     volumes:
       - minio_data:/data
 
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      # Нестандартные порты снаружи — по опыту с Postgres, у которого
+      # стандартный 5432 и соседний 5433 уже были заняты другими проектами.
+      - "5673:5672"   # AMQP — сюда стучится наше Go-приложение
+      - "15673:15672" # веб-консоль (http://localhost:15673, guest/guest)
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
 volumes:
   postgres_data:
   minio_data:
+  rabbitmq_data:

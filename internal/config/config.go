@@ -48,13 +48,18 @@ type S3Config struct {
 	UseSSL    bool
 }
 
+// BrokerConfig содержит настройки подключения к RabbitMQ.
+type BrokerConfig struct {
+	URL string
+}
+
 // Config — корневая структура конфигурации всего приложения.
-// В следующих инкрементах сюда добавится секция Broker.
 type Config struct {
 	Env            string
 	Server         ServerConfig
 	Database       DatabaseConfig
 	S3             S3Config
+	Broker         BrokerConfig
 	MigrationsPath string
 }
 
@@ -103,6 +108,9 @@ func Load() (*Config, error) {
 			SecretKey: getEnv("S3_SECRET_KEY", "minioadmin"),
 			Bucket:    getEnv("S3_BUCKET", "avatars"),
 			UseSSL:    s3UseSSL,
+		},
+		Broker: BrokerConfig{
+			URL: getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5673/"),
 		},
 		MigrationsPath: getEnv("MIGRATIONS_PATH", "migrations"),
 	}

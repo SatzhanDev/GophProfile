@@ -18,6 +18,7 @@ import (
 	"github.com/SatzhanDev/GophProfile/internal/handlers"
 	"github.com/SatzhanDev/GophProfile/internal/repository"
 	"github.com/SatzhanDev/GophProfile/internal/services"
+	"github.com/SatzhanDev/GophProfile/pkg/broker"
 	"github.com/SatzhanDev/GophProfile/pkg/postgres"
 	"github.com/SatzhanDev/GophProfile/pkg/s3"
 )
@@ -67,15 +68,28 @@ func main() {
 	}
 	slog.Info("s3 bucket ready", "bucket", cfg.S3.Bucket)
 
+	publisher, err := broker.NewPublisher(cfg.Broker.URL)
+	if err != nil {
+		slog.Error("failed to connect to rabbitmq", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := publisher.Close(); err != nil {
+			slog.Error("failed to close rabbitmq publisher", "error", err)
+		}
+	}()
+	slog.Info("rabbitmq connected")
+
 	healthChecks := map[string]handlers.Pinger{
 		"postgres": dbPool,
 		"s3":       s3Client,
+		"rabbitmq": publisher,
 	}
 
 	// Слои приложения собираются снизу вверх: репозиторий (доступ к БД) →
-	// сервис (бизнес-правила поверх репозитория и S3) → хендлер (HTTP).
+	// сервис (бизнес-правила поверх репозитория, S3 и брокера) → хендлер (HTTP).
 	avatarRepo := repository.NewPostgresAvatarRepository(dbPool)
-	avatarService := services.NewAvatarService(avatarRepo, s3Client)
+	avatarService := services.NewAvatarService(avatarRepo, s3Client, publisher)
 	avatarHandler := handlers.NewAvatarHandler(avatarService)
 
 	router := api.NewRouter(api.Deps{

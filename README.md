@@ -30,23 +30,25 @@ tests/          — интеграционные тесты
 
 ```
 cp .env.example .env      # при желании поправить под себя
-docker compose up -d postgres minio
+docker compose up -d postgres minio rabbitmq
 go mod tidy
 go run ./cmd/server
 ```
 
 При старте сервер подключается к PostgreSQL и применяет миграции из `migrations/`,
-а также подключается к MinIO и создаёт бакет из `S3_BUCKET`, если его ещё нет.
+подключается к MinIO и создаёт бакет из `S3_BUCKET`, если его ещё нет, а также
+подключается к RabbitMQ и объявляет exchange `avatars.exchange`.
 Файл `.env` в корне проекта подхватывается автоматически (через `godotenv`) — можно
 менять значения там, не трогая переменные окружения шелла. Если `.env` нет —
 приложение не падает, а просто использует дефолты/переменные окружения процесса
 (так и должно быть в докере/проде, где `.env`-файла обычно не бывает).
 
 Проверка: `curl http://localhost:8080/health` — должно вернуться
-`{"status":"ok","components":{"postgres":{"status":"ok"},"s3":{"status":"ok"}}}`.
+`{"status":"ok","components":{"postgres":{"status":"ok"},"s3":{"status":"ok"},"rabbitmq":{"status":"ok"}}}`.
 
-Веб-консоль MinIO (посмотреть загруженные файлы глазами) — http://localhost:9001,
-логин/пароль `minioadmin`/`minioadmin`.
+Веб-консоли: MinIO — http://localhost:9001 (`minioadmin`/`minioadmin`),
+RabbitMQ — http://localhost:15673 (`guest`/`guest`, вкладка Exchanges покажет
+`avatars.exchange`).
 
 ## API аватарок
 
@@ -75,6 +77,12 @@ curl -X DELETE http://localhost:8080/api/v1/avatars/<avatar_id> -H "X-User-ID: u
 Миниатюры (`?size=100x100`/`300x300` на `GET /avatars/{id}`) в ответе появятся
 только после инкремента с воркером — пока `ThumbnailS3Keys` всегда пустой.
 
+После каждой успешной загрузки и удаления сервер публикует событие в
+`avatars.exchange` (routing key `avatar.uploaded`/`avatar.deleted`) — их пока
+некому забирать, воркер-подписчик появится в следующем инкременте. Проверить,
+что события реально летят, можно во вкладке Exchanges веб-консоли RabbitMQ —
+там видно счётчик "publish" по exchange.
+
 ## Переменные окружения
 
 | Переменная               | По умолчанию  | Описание                     |
@@ -94,6 +102,7 @@ curl -X DELETE http://localhost:8080/api/v1/avatars/<avatar_id> -H "X-User-ID: u
 | S3_SECRET_KEY              | minioadmin    | secret key                     |
 | S3_BUCKET                  | avatars       | бакет, где хранятся файлы аватарок |
 | S3_USE_SSL                 | false         | использовать ли HTTPS до хранилища |
+| RABBITMQ_URL               | amqp://guest:guest@localhost:5673/ | адрес RabbitMQ (AMQP) |
 | MIGRATIONS_PATH            | migrations    | путь к папке с SQL-миграциями  |
 
 ## План инкрементов
@@ -102,7 +111,7 @@ curl -X DELETE http://localhost:8080/api/v1/avatars/<avatar_id> -H "X-User-ID: u
 2. Домен + PostgreSQL (миграции, репозиторий аватарок) — **готово**
 3. Интеграция с S3/MinIO — **готово**
 4. REST API: загрузка, получение, удаление аватарок — **готово**
-5. RabbitMQ: публикация событий после загрузки
+5. RabbitMQ: публикация событий после загрузки — **готово**
 6. Worker: генерация миниатюр, обработка удаления
 7. Веб-интерфейс (загрузка + галерея)
 8. Юнит-тесты, golangci-lint

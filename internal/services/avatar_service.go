@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/google/uuid"
 
@@ -35,15 +36,24 @@ type Storage interface {
 	Delete(ctx context.Context, key string) error
 }
 
-// AvatarService реализует бизнес-правила поверх репозитория и хранилища.
+// EventPublisher — то, что нужно AvatarService от брокера сообщений:
+// опубликовать событие с заданным routing key. Реальная реализация —
+// *broker.Publisher (RabbitMQ), но сервис снова работает с интерфейсом.
+type EventPublisher interface {
+	Publish(ctx context.Context, routingKey string, payload any) error
+}
+
+// AvatarService реализует бизнес-правила поверх репозитория, хранилища
+// и брокера сообщений.
 type AvatarService struct {
-	repo    repository.AvatarRepository
-	storage Storage
+	repo      repository.AvatarRepository
+	storage   Storage
+	publisher EventPublisher
 }
 
 // NewAvatarService создаёт AvatarService.
-func NewAvatarService(repo repository.AvatarRepository, storage Storage) *AvatarService {
-	return &AvatarService{repo: repo, storage: storage}
+func NewAvatarService(repo repository.AvatarRepository, storage Storage, publisher EventPublisher) *AvatarService {
+	return &AvatarService{repo: repo, storage: storage, publisher: publisher}
 }
 
 // Upload проверяет лимиты, сохраняет оригинал в S3 и создаёт метаданные в БД.
@@ -81,6 +91,21 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName, detectedMi
 
 	if err := s.repo.Create(ctx, avatar); err != nil {
 		return nil, fmt.Errorf("save avatar metadata: %w", err)
+	}
+
+	// Файл и метаданные уже надёжно сохранены — это то, что действительно
+	// важно для пользователя. Поэтому если публикация события не удалась
+	// (RabbitMQ временно недоступен и т.п.), мы не проваливаем весь запрос
+	// с ошибкой 500 — просто логируем: аватарка загружена, а генерация
+	// миниатюр по ней отложится (в текущей версии — до следующей загрузки
+	// или ручного вмешательства; полноценный outbox/ретрай — уже за рамками MVP).
+	event := domain.AvatarUploadEvent{
+		AvatarID: avatar.ID.String(),
+		UserID:   avatar.UserID,
+		S3Key:    avatar.S3Key,
+	}
+	if err := s.publisher.Publish(ctx, domain.RoutingKeyAvatarUploaded, event); err != nil {
+		slog.Error("failed to publish avatar upload event", "avatar_id", avatar.ID, "error", err)
 	}
 
 	return avatar, nil
@@ -141,8 +166,6 @@ func (s *AvatarService) ListForUser(ctx context.Context, userID string) ([]domai
 }
 
 // Delete мягко удаляет аватарку, только если запрашивает её владелец.
-// Сам файл в S3 пока не трогаем — по ТЗ его удаление асинхронное, через
-// брокер и воркера, это появится в инкременте 5-6.
 func (s *AvatarService) Delete(ctx context.Context, id uuid.UUID, requesterUserID string) error {
 	avatar, err := s.repo.GetByID(ctx, id)
 	if err != nil {
@@ -153,7 +176,7 @@ func (s *AvatarService) Delete(ctx context.Context, id uuid.UUID, requesterUserI
 		return ErrForbidden
 	}
 
-	return s.repo.SoftDelete(ctx, id)
+	return s.softDeleteAndPublish(ctx, avatar)
 }
 
 // DeleteLatestForUser — то же самое, что Delete, но для маршрута
@@ -168,5 +191,31 @@ func (s *AvatarService) DeleteLatestForUser(ctx context.Context, userID, request
 		return err
 	}
 
-	return s.repo.SoftDelete(ctx, avatar.ID)
+	return s.softDeleteAndPublish(ctx, avatar)
+}
+
+// softDeleteAndPublish — общая часть Delete и DeleteLatestForUser: помечает
+// запись удалённой в БД и публикует событие для воркера, чтобы тот в фоне
+// стёр из S3 сам файл и все его миниатюры (по ТЗ — асинхронное удаление).
+//
+// Мягкое удаление в БД — это источник истины о том, видна ли аватарка
+// пользователям; оно уже произошло к моменту публикации события, поэтому,
+// как и при загрузке, ошибку публикации не считаем фатальной для запроса.
+func (s *AvatarService) softDeleteAndPublish(ctx context.Context, avatar *domain.Avatar) error {
+	if err := s.repo.SoftDelete(ctx, avatar.ID); err != nil {
+		return err
+	}
+
+	keys := make([]string, 0, 1+len(avatar.ThumbnailS3Keys))
+	keys = append(keys, avatar.S3Key)
+	for _, thumbKey := range avatar.ThumbnailS3Keys {
+		keys = append(keys, thumbKey)
+	}
+
+	event := domain.AvatarDeleteEvent{AvatarID: avatar.ID.String(), S3Keys: keys}
+	if err := s.publisher.Publish(ctx, domain.RoutingKeyAvatarDeleted, event); err != nil {
+		slog.Error("failed to publish avatar delete event", "avatar_id", avatar.ID, "error", err)
+	}
+
+	return nil
 }
