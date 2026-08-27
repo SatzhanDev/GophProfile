@@ -111,31 +111,39 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName, detectedMi
 	return avatar, nil
 }
 
-// GetFile отдаёт метаданные и поток байт нужного варианта аватарки.
-// size == "" или "original" — оригинал. Любое другое значение ищется
-// среди уже сгенерированных миниатюр (avatar.ThumbnailS3Keys); пока воркер
-// (появится в инкременте 6) их не сгенерировал — вернётся ErrThumbnailNotAvailable.
-func (s *AvatarService) GetFile(ctx context.Context, id uuid.UUID, size string) (*domain.Avatar, io.ReadCloser, error) {
+// thumbnailContentType — воркер (см. pkg/thumbnail) всегда кодирует
+// миниатюры в JPEG независимо от формата оригинала, поэтому и Content-Type
+// для них фиксированный, а не MimeType исходного файла.
+const thumbnailContentType = "image/jpeg"
+
+// GetFile отдаёт метаданные, поток байт и Content-Type нужного варианта
+// аватарки. size == "" или "original" — оригинал (Content-Type — исходный
+// avatar.MimeType). Любое другое значение ищется среди уже сгенерированных
+// миниатюр (avatar.ThumbnailS3Keys, всегда JPEG); если воркер её ещё не
+// сделал — вернётся ErrThumbnailNotAvailable.
+func (s *AvatarService) GetFile(ctx context.Context, id uuid.UUID, size string) (*domain.Avatar, io.ReadCloser, string, error) {
 	avatar, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	key := avatar.S3Key
+	contentType := avatar.MimeType
 	if size != "" && size != "original" {
 		thumbKey, ok := avatar.ThumbnailS3Keys[size]
 		if !ok {
-			return nil, nil, ErrThumbnailNotAvailable
+			return nil, nil, "", ErrThumbnailNotAvailable
 		}
 		key = thumbKey
+		contentType = thumbnailContentType
 	}
 
 	body, err := s.storage.Download(ctx, key)
 	if err != nil {
-		return nil, nil, fmt.Errorf("download object: %w", err)
+		return nil, nil, "", fmt.Errorf("download object: %w", err)
 	}
 
-	return avatar, body, nil
+	return avatar, body, contentType, nil
 }
 
 // GetLatestForUser нужен эндпоинту GET /users/{user_id}/avatar — самой

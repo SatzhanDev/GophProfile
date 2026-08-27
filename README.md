@@ -10,7 +10,7 @@ Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker.
 
 ```
 cmd/server/     — точка входа HTTP-сервера
-cmd/worker/     — точка входа воркера асинхронной обработки (появится позже)
+cmd/worker/     — точка входа воркера асинхронной обработки
 internal/api/   — сборка роутера и middleware
 internal/config/— загрузка конфигурации из env
 internal/domain/    — доменные модели
@@ -34,6 +34,15 @@ docker compose up -d postgres minio rabbitmq
 go mod tidy
 go run ./cmd/server
 ```
+
+Воркер — отдельный процесс, запускается в соседнем терминале:
+
+```
+go run ./cmd/worker
+```
+
+(или `make run-worker`). Оба процесса читают одну и ту же конфигурацию
+из `.env`/переменных окружения.
 
 При старте сервер подключается к PostgreSQL и применяет миграции из `migrations/`,
 подключается к MinIO и создаёт бакет из `S3_BUCKET`, если его ещё нет, а также
@@ -74,14 +83,19 @@ curl http://localhost:8080/api/v1/users/user-1/avatars
 curl -X DELETE http://localhost:8080/api/v1/avatars/<avatar_id> -H "X-User-ID: user-1"
 ```
 
-Миниатюры (`?size=100x100`/`300x300` на `GET /avatars/{id}`) в ответе появятся
-только после инкремента с воркером — пока `ThumbnailS3Keys` всегда пустой.
-
 После каждой успешной загрузки и удаления сервер публикует событие в
-`avatars.exchange` (routing key `avatar.uploaded`/`avatar.deleted`) — их пока
-некому забирать, воркер-подписчик появится в следующем инкременте. Проверить,
-что события реально летят, можно во вкладке Exchanges веб-консоли RabbitMQ —
-там видно счётчик "publish" по exchange.
+`avatars.exchange` (routing key `avatar.uploaded`/`avatar.deleted`). Воркер
+(запущенный отдельно, см. выше) их разбирает: на `avatar.uploaded` — качает
+оригинал, режет миниатюры 100x100 и 300x300 (всегда в JPEG, независимо от
+формата оригинала) и кладёт их в S3; на `avatar.deleted` — стирает из S3
+оригинал и все миниатюры. Через несколько секунд после загрузки
+`GET /avatars/{id}/metadata` покажет непустой `thumbnails`, а
+`GET /avatars/{id}?size=100x100` отдаст готовую миниатюру.
+
+Проверить, что события долетают и разбираются, можно в веб-консоли
+RabbitMQ (http://localhost:15673) — на вкладке Queues у `avatars.thumbnails`
+и `avatars.cleanup` счётчик `Ready` должен обнуляться почти сразу после
+публикации, если воркер запущен и работает.
 
 ## Переменные окружения
 
@@ -112,7 +126,7 @@ curl -X DELETE http://localhost:8080/api/v1/avatars/<avatar_id> -H "X-User-ID: u
 3. Интеграция с S3/MinIO — **готово**
 4. REST API: загрузка, получение, удаление аватарок — **готово**
 5. RabbitMQ: публикация событий после загрузки — **готово**
-6. Worker: генерация миниатюр, обработка удаления
+6. Worker: генерация миниатюр, обработка удаления — **готово**
 7. Веб-интерфейс (загрузка + галерея)
 8. Юнит-тесты, golangci-lint
 9. Docker / docker-compose

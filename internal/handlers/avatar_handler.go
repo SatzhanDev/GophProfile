@@ -73,9 +73,10 @@ type metadataResponse struct {
 //
 // Поле "dimensions" (ширина/высота оригинала) из примера в ТЗ здесь
 // намеренно отсутствует: у нас в БД нет для этого столбцов, а определять
-// размеры на лету при каждом запросе — лишняя работа. Это естественно
-// добавить в инкременте с воркером: он и так декодирует картинку, чтобы
-// сделать миниатюры, — тогда же можно один раз посчитать и сохранить размеры.
+// размеры на лету при каждом запросе — лишняя работа. Воркер (internal/worker)
+// уже декодирует картинку, чтобы сделать миниатюры, — туда несложно
+// добавить сохранение width/height, если это понадобится; в этом
+// инкременте сознательно ограничились только миниатюрами и удалением.
 func toMetadataResponse(a *domain.Avatar) metadataResponse {
 	sizes := make([]string, 0, len(a.ThumbnailS3Keys))
 	for size := range a.ThumbnailS3Keys {
@@ -193,7 +194,7 @@ func (h *AvatarHandler) GetAvatar(w http.ResponseWriter, r *http.Request) {
 
 	size := r.URL.Query().Get("size")
 
-	avatar, body, err := h.service.GetFile(r.Context(), id, size)
+	avatar, body, contentType, err := h.service.GetFile(r.Context(), id, size)
 	if err != nil {
 		switch {
 		case errors.Is(err, repository.ErrAvatarNotFound):
@@ -208,7 +209,7 @@ func (h *AvatarHandler) GetAvatar(w http.ResponseWriter, r *http.Request) {
 	}
 	defer body.Close()
 
-	writeImage(w, avatar, body)
+	writeImage(w, contentType, avatar, body)
 }
 
 // GetUserAvatar — GET /api/v1/users/{userID}/avatar. Это тот самый эндпоинт
@@ -229,7 +230,9 @@ func (h *AvatarHandler) GetUserAvatar(w http.ResponseWriter, r *http.Request) {
 	}
 	defer body.Close()
 
-	writeImage(w, avatar, body)
+	// GetLatestForUser всегда отдаёт оригинал (см. комментарий к методу
+	// в сервисе), поэтому Content-Type здесь — это MimeType самого файла.
+	writeImage(w, avatar.MimeType, avatar, body)
 }
 
 func (h *AvatarHandler) writePlaceholder(w http.ResponseWriter) {
@@ -246,8 +249,10 @@ func (h *AvatarHandler) writePlaceholder(w http.ResponseWriter) {
 
 // writeImage — общая часть отдачи бинарных данных картинки для
 // GetAvatar и GetUserAvatar: одинаковые заголовки, одинаковое копирование.
-func writeImage(w http.ResponseWriter, avatar *domain.Avatar, body io.Reader) {
-	w.Header().Set("Content-Type", avatar.MimeType)
+// contentType передаётся явно, а не берётся из avatar.MimeType — для
+// миниатюр это не одно и то же (см. AvatarService.GetFile).
+func writeImage(w http.ResponseWriter, contentType string, avatar *domain.Avatar, body io.Reader) {
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "max-age=86400")
 	w.Header().Set("ETag", fmt.Sprintf(`"%s-%d"`, avatar.ID, avatar.UpdatedAt.Unix()))
 	w.WriteHeader(http.StatusOK)
