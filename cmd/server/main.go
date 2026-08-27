@@ -16,6 +16,8 @@ import (
 	"github.com/SatzhanDev/GophProfile/internal/api"
 	"github.com/SatzhanDev/GophProfile/internal/config"
 	"github.com/SatzhanDev/GophProfile/internal/handlers"
+	"github.com/SatzhanDev/GophProfile/internal/repository"
+	"github.com/SatzhanDev/GophProfile/internal/services"
 	"github.com/SatzhanDev/GophProfile/pkg/postgres"
 	"github.com/SatzhanDev/GophProfile/pkg/s3"
 )
@@ -70,7 +72,17 @@ func main() {
 		"s3":       s3Client,
 	}
 
-	router := api.NewRouter(cfg, healthChecks)
+	// Слои приложения собираются снизу вверх: репозиторий (доступ к БД) →
+	// сервис (бизнес-правила поверх репозитория и S3) → хендлер (HTTP).
+	avatarRepo := repository.NewPostgresAvatarRepository(dbPool)
+	avatarService := services.NewAvatarService(avatarRepo, s3Client)
+	avatarHandler := handlers.NewAvatarHandler(avatarService)
+
+	router := api.NewRouter(api.Deps{
+		Config:        cfg,
+		HealthChecks:  healthChecks,
+		AvatarHandler: avatarHandler,
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.Server.Address(),

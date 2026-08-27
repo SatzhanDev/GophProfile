@@ -12,11 +12,18 @@ import (
 	"github.com/SatzhanDev/GophProfile/internal/handlers"
 )
 
+// Deps — все зависимости, нужные роутеру, чтобы собрать хендлеры.
+// Раньше эти параметры передавались по одному, но с ростом числа хендлеров
+// длинный список позиционных аргументов стал бы неудобным и хрупким
+// (легко перепутать порядок) — поэтому дальше растим именно эту структуру.
+type Deps struct {
+	Config        *config.Config
+	HealthChecks  map[string]handlers.Pinger
+	AvatarHandler *handlers.AvatarHandler
+}
+
 // NewRouter собирает chi.Router со всеми middleware и маршрутами сервиса.
-// healthChecks нужен здесь только для health-чека; когда появятся хендлеры
-// аватарок, сигнатура получит дополнительные зависимости (репозиторий,
-// S3-клиент и т.д. — им, в отличие от health-чека, нужны не только Ping).
-func NewRouter(cfg *config.Config, healthChecks map[string]handlers.Pinger) http.Handler {
+func NewRouter(deps Deps) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -25,14 +32,17 @@ func NewRouter(cfg *config.Config, healthChecks map[string]handlers.Pinger) http
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
-	r.Get("/health", handlers.NewHealthHandler(healthChecks).ServeHTTP)
+	r.Get("/health", handlers.NewHealthHandler(deps.HealthChecks).ServeHTTP)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// В следующих инкрементах здесь появятся:
-		// r.Post("/avatars", ...)
-		// r.Get("/avatars/{avatarID}", ...)
-		// r.Get("/users/{userID}/avatar", ...)
-		// r.Delete("/avatars/{avatarID}", ...)
+		r.Post("/avatars", deps.AvatarHandler.UploadAvatar)
+		r.Get("/avatars/{avatarID}", deps.AvatarHandler.GetAvatar)
+		r.Get("/avatars/{avatarID}/metadata", deps.AvatarHandler.GetMetadata)
+		r.Delete("/avatars/{avatarID}", deps.AvatarHandler.DeleteAvatar)
+
+		r.Get("/users/{userID}/avatar", deps.AvatarHandler.GetUserAvatar)
+		r.Delete("/users/{userID}/avatar", deps.AvatarHandler.DeleteUserAvatar)
+		r.Get("/users/{userID}/avatars", deps.AvatarHandler.ListUserAvatars)
 	})
 
 	return r

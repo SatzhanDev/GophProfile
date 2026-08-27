@@ -48,6 +48,33 @@ go run ./cmd/server
 Веб-консоль MinIO (посмотреть загруженные файлы глазами) — http://localhost:9001,
 логин/пароль `minioadmin`/`minioadmin`.
 
+## API аватарок
+
+```
+# Загрузить аватарку
+curl -X POST http://localhost:8080/api/v1/avatars \
+  -H "X-User-ID: user-1" \
+  -F "file=@avatar.jpg"
+
+# Получить аватарку по её id (бинарные данные)
+curl http://localhost:8080/api/v1/avatars/<avatar_id> -o out.jpg
+
+# Получить самую свежую аватарку пользователя (заглушка, если её ещё нет)
+curl http://localhost:8080/api/v1/users/user-1/avatar -o out.png
+
+# Метаданные аватарки
+curl http://localhost:8080/api/v1/avatars/<avatar_id>/metadata
+
+# Все аватарки пользователя
+curl http://localhost:8080/api/v1/users/user-1/avatars
+
+# Удалить аватарку (может только владелец — сверяется X-User-ID)
+curl -X DELETE http://localhost:8080/api/v1/avatars/<avatar_id> -H "X-User-ID: user-1"
+```
+
+Миниатюры (`?size=100x100`/`300x300` на `GET /avatars/{id}`) в ответе появятся
+только после инкремента с воркером — пока `ThumbnailS3Keys` всегда пустой.
+
 ## Переменные окружения
 
 | Переменная               | По умолчанию  | Описание                     |
@@ -74,7 +101,7 @@ go run ./cmd/server
 1. Скелет проекта, конфиг, `/health` — **готово**
 2. Домен + PostgreSQL (миграции, репозиторий аватарок) — **готово**
 3. Интеграция с S3/MinIO — **готово**
-4. REST API: загрузка, получение, удаление аватарок
+4. REST API: загрузка, получение, удаление аватарок — **готово**
 5. RabbitMQ: публикация событий после загрузки
 6. Worker: генерация миниатюр, обработка удаления
 7. Веб-интерфейс (загрузка + галерея)
