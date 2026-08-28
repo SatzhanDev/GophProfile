@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GophProfile — загрузка аватарки</title>
+    <link rel="stylesheet" href="/web/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Загрузить аватарку</h1>
+
+        <!--
+          Форма рабочая и без JavaScript: action/method — обычный
+          multipart POST на /web/upload, сервер обработает и сделает
+          редирект на галерею. Скрипт upload.js — прогрессивное улучшение
+          поверх этого: если JS доступен, он перехватывает submit и грузит
+          файл через JSON API с прогресс-баром, без перезагрузки страницы.
+        -->
+        <form id="upload-form" action="/web/upload" method="POST" enctype="multipart/form-data">
+            <label class="field">
+                Идентификатор пользователя
+                <input type="text" name="user_id" id="user-id" value="{{.UserID}}" required>
+            </label>
+
+            <div id="dropzone" class="dropzone">
+                <img id="preview" class="preview" hidden alt="Превью">
+                <p id="dropzone-text">Перетащите картинку сюда или нажмите, чтобы выбрать файл</p>
+                <input type="file" name="file" id="file-input" accept="image/jpeg,image/png,image/webp" required hidden>
+            </div>
+
+            <div id="progress-wrap" class="progress-wrap" hidden>
+                <div id="progress-bar" class="progress-bar"></div>
+            </div>
+
+            <p id="status-message" class="status-message"></p>
+
+            <button type="submit">Загрузить</button>
+        </form>
+    </div>
+
+    <script src="/web/static/upload.js"></script>
+</body>
+</html>

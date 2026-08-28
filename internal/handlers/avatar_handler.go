@@ -126,31 +126,12 @@ func (h *AvatarHandler) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	file, header, err := r.FormFile("file")
+	file, header, detectedType, err := extractUploadedFile(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "file field is required")
 		return
 	}
 	defer file.Close()
-
-	// Определяем реальный тип файла по первым байтам содержимого (magic
-	// bytes), а не по Content-Type, который прислал клиент, — этому
-	// заголовку доверять нельзя, его можно подделать никак не трогая сам файл.
-	sniff := make([]byte, 512)
-	n, err := file.Read(sniff)
-	if err != nil && !errors.Is(err, io.EOF) {
-		writeError(w, http.StatusBadRequest, "failed to read file")
-		return
-	}
-	detectedType := http.DetectContentType(sniff[:n])
-
-	// multipart.File — это ещё и io.Seeker, поэтому просто перематываем
-	// файл в начало вместо того, чтобы городить составной reader из уже
-	// прочитанных байт и остатка потока.
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to read file")
-		return
-	}
 
 	avatar, err := h.service.Upload(r.Context(), userID, header.Filename, detectedType, header.Size, file)
 	switch {

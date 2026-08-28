@@ -21,6 +21,7 @@ import (
 	"github.com/SatzhanDev/GophProfile/pkg/broker"
 	"github.com/SatzhanDev/GophProfile/pkg/postgres"
 	"github.com/SatzhanDev/GophProfile/pkg/s3"
+	"github.com/SatzhanDev/GophProfile/web"
 )
 
 func main() {
@@ -92,10 +93,17 @@ func main() {
 	avatarService := services.NewAvatarService(avatarRepo, s3Client, publisher)
 	avatarHandler := handlers.NewAvatarHandler(avatarService)
 
+	webHandler, err := handlers.NewWebHandler(avatarService, web.TemplatesFS, web.StaticFS)
+	if err != nil {
+		slog.Error("failed to init web handler", "error", err)
+		os.Exit(1)
+	}
+
 	router := api.NewRouter(api.Deps{
 		Config:        cfg,
 		HealthChecks:  healthChecks,
 		AvatarHandler: avatarHandler,
+		WebHandler:    webHandler,
 	})
 
 	srv := &http.Server{

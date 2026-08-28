@@ -20,6 +20,7 @@ type Deps struct {
 	Config        *config.Config
 	HealthChecks  map[string]handlers.Pinger
 	AvatarHandler *handlers.AvatarHandler
+	WebHandler    *handlers.WebHandler
 }
 
 // NewRouter собирает chi.Router со всеми middleware и маршрутами сервиса.
@@ -34,6 +35,10 @@ func NewRouter(deps Deps) http.Handler {
 
 	r.Get("/health", handlers.NewHealthHandler(deps.HealthChecks).ServeHTTP)
 
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/web/upload", http.StatusFound)
+	})
+
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/avatars", deps.AvatarHandler.UploadAvatar)
 		r.Get("/avatars/{avatarID}", deps.AvatarHandler.GetAvatar)
@@ -43,6 +48,13 @@ func NewRouter(deps Deps) http.Handler {
 		r.Get("/users/{userID}/avatar", deps.AvatarHandler.GetUserAvatar)
 		r.Delete("/users/{userID}/avatar", deps.AvatarHandler.DeleteUserAvatar)
 		r.Get("/users/{userID}/avatars", deps.AvatarHandler.ListUserAvatars)
+	})
+
+	r.Route("/web", func(r chi.Router) {
+		r.Get("/upload", deps.WebHandler.UploadForm)
+		r.Post("/upload", deps.WebHandler.UploadSubmit)
+		r.Get("/gallery/{userID}", deps.WebHandler.GalleryPage)
+		r.Handle("/static/*", http.HandlerFunc(deps.WebHandler.ServeStatic))
 	})
 
 	return r
