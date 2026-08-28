@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/disintegration/imaging v1.6.2
 	github.com/go-chi/chi/v5 v5.1.0
+	github.com/go-chi/cors v1.2.1
 	github.com/golang-migrate/migrate/v4 v4.17.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
@@ -16,6 +17,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.31.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.31.0
 	golang.org/x/image v0.15.0
+	golang.org/x/time v0.9.0
 )
 
 require (

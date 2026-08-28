@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -62,7 +63,10 @@ func newTestRouter(t *testing.T) http.Handler {
 	require.NoError(t, err)
 
 	return NewRouter(Deps{
-		Config:        &config.Config{},
+		Config: &config.Config{
+			CORS:      config.CORSConfig{AllowedOrigins: []string{"*"}},
+			RateLimit: config.RateLimitConfig{RequestsPerSecond: 1000, Burst: 1000},
+		},
 		HealthChecks:  map[string]handlers.Pinger{},
 		AvatarHandler: avatarHandler,
 		WebHandler:    webHandler,
@@ -124,4 +128,22 @@ func TestNewRouter_WebStaticAssetsAreServed(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Header().Get("Content-Type"), "css")
+}
+
+func TestNewRouter_CORSPreflight(t *testing.T) {
+	r := newTestRouter(t)
+
+	// Preflight-запрос, который браузер шлёт сам, перед настоящим
+	// cross-origin запросом (например, DELETE с заголовком X-User-ID
+	// с фронтенда на другом домене).
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/avatars/"+uuid.NewString(), nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodDelete)
+	req.Header.Set("Access-Control-Request-Headers", "X-User-ID")
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	require.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+	require.Contains(t, strings.ToLower(rec.Header().Get("Access-Control-Allow-Headers")), "x-user-id")
 }

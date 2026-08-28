@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -53,6 +54,20 @@ type BrokerConfig struct {
 	URL string
 }
 
+// CORSConfig содержит список origin'ов, которым разрешены cross-origin
+// запросы к API (например, домен фронтенда, если он живёт отдельно от
+// GophProfile). "*" — разрешить всем, разумный дефолт для разработки,
+// но не для прода.
+type CORSConfig struct {
+	AllowedOrigins []string
+}
+
+// RateLimitConfig задаёт лимит запросов на один IP (алгоритм token bucket).
+type RateLimitConfig struct {
+	RequestsPerSecond float64
+	Burst             int
+}
+
 // Config — корневая структура конфигурации всего приложения.
 type Config struct {
 	Env            string
@@ -60,6 +75,8 @@ type Config struct {
 	Database       DatabaseConfig
 	S3             S3Config
 	Broker         BrokerConfig
+	CORS           CORSConfig
+	RateLimit      RateLimitConfig
 	MigrationsPath string
 }
 
@@ -83,6 +100,16 @@ func Load() (*Config, error) {
 	}
 
 	s3UseSSL, err := getEnvBool("S3_USE_SSL", false)
+	if err != nil {
+		return nil, err
+	}
+
+	rateLimitRPS, err := getEnvFloat("RATE_LIMIT_RPS", 5)
+	if err != nil {
+		return nil, err
+	}
+
+	rateLimitBurst, err := getEnvInt("RATE_LIMIT_BURST", 10)
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +138,13 @@ func Load() (*Config, error) {
 		},
 		Broker: BrokerConfig{
 			URL: getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5673/"),
+		},
+		CORS: CORSConfig{
+			AllowedOrigins: getEnvStringSlice("CORS_ALLOWED_ORIGINS", []string{"*"}),
+		},
+		RateLimit: RateLimitConfig{
+			RequestsPerSecond: rateLimitRPS,
+			Burst:             rateLimitBurst,
 		},
 		MigrationsPath: getEnv("MIGRATIONS_PATH", "migrations"),
 	}
@@ -147,6 +181,36 @@ func getEnvBool(key string, fallback bool) (bool, error) {
 		return false, fmt.Errorf("invalid value for %s: %w", key, err)
 	}
 	return b, nil
+}
+
+func getEnvFloat(key string, fallback float64) (float64, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid value for %s: %w", key, err)
+	}
+	return f, nil
+}
+
+// getEnvStringSlice читает список значений через запятую, например
+// "https://a.com,https://b.com" -> []string{"https://a.com", "https://b.com"}.
+func getEnvStringSlice(key string, fallback []string) []string {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback
+	}
+
+	parts := strings.Split(v, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }
 
 func getEnvDuration(key string, fallback time.Duration) (time.Duration, error) {

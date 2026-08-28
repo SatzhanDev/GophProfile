@@ -111,6 +111,10 @@ func (h *AvatarHandler) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "X-User-ID header is required")
 		return
 	}
+	if !isValidUserID(userID) {
+		writeError(w, http.StatusBadRequest, "X-User-ID has invalid format")
+		return
+	}
 
 	// Жёстко обрезаем тело запроса чуть выше лимита файла (запас — под
 	// служебные байты multipart-разметки: границы между частями и т.п.).
@@ -294,6 +298,10 @@ func (h *AvatarHandler) DeleteAvatar(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "X-User-ID header is required")
 		return
 	}
+	if !isValidUserID(userID) {
+		writeError(w, http.StatusBadRequest, "X-User-ID has invalid format")
+		return
+	}
 
 	err = h.service.Delete(r.Context(), id, userID)
 	if !handleDeleteError(w, err) {
@@ -310,6 +318,10 @@ func (h *AvatarHandler) DeleteUserAvatar(w http.ResponseWriter, r *http.Request)
 	requesterID := r.Header.Get("X-User-ID")
 	if requesterID == "" {
 		writeError(w, http.StatusBadRequest, "X-User-ID header is required")
+		return
+	}
+	if !isValidUserID(requesterID) {
+		writeError(w, http.StatusBadRequest, "X-User-ID has invalid format")
 		return
 	}
 

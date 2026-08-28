@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 
 	"github.com/SatzhanDev/GophProfile/internal/config"
 	"github.com/SatzhanDev/GophProfile/internal/handlers"
@@ -33,13 +34,29 @@ func NewRouter(deps Deps) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   deps.Config.CORS.AllowedOrigins,
+		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodOptions},
+		AllowedHeaders:   []string{"Content-Type", "X-User-ID"},
+		ExposedHeaders:   []string{"ETag"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}))
+
 	r.Get("/health", handlers.NewHealthHandler(deps.HealthChecks).ServeHTTP)
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/web/upload", http.StatusFound)
 	})
 
+	// Rate limiting — только на API: сюда стучатся сторонние клиенты
+	// (блоги, форумы и т.п. из идеи продукта), и именно этот трафик
+	// нужно защищать от злоупотребления. /health и /web не лимитируем.
+	limiter := newIPRateLimiter(deps.Config.RateLimit.RequestsPerSecond, deps.Config.RateLimit.Burst)
+
 	r.Route("/api/v1", func(r chi.Router) {
+		r.Use(limiter.Middleware)
+
 		r.Post("/avatars", deps.AvatarHandler.UploadAvatar)
 		r.Get("/avatars/{avatarID}", deps.AvatarHandler.GetAvatar)
 		r.Get("/avatars/{avatarID}/metadata", deps.AvatarHandler.GetMetadata)

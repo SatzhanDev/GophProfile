@@ -81,6 +81,10 @@ func (h *WebHandler) UploadSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user_id is required", http.StatusBadRequest)
 		return
 	}
+	if !isValidUserID(userID) {
+		http.Error(w, "user_id has invalid format", http.StatusBadRequest)
+		return
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, services.MaxAvatarSize+512<<10)
 	if err := r.ParseMultipartForm(services.MaxAvatarSize); err != nil {
