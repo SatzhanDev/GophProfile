@@ -22,7 +22,11 @@ func RunMigrations(migrationsPath, dsn string) error {
 	if err != nil {
 		return fmt.Errorf("init migrator: %w", err)
 	}
-	defer m.Close()
+	// Close у golang-migrate возвращает сразу две ошибки (source, database) —
+	// обе осознанно игнорируем, они нас не интересуют после того, как
+	// миграции уже применены (или не применились — тогда мы уже вернули
+	// содержательную ошибку из m.Up() выше).
+	defer func() { _, _ = m.Close() }()
 
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("apply migrations: %w", err)

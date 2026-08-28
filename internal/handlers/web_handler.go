@@ -93,7 +93,7 @@ func (h *WebHandler) UploadSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file field is required", http.StatusBadRequest)
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	if _, err := h.service.Upload(r.Context(), userID, header.Filename, detectedType, header.Size, file); err != nil {
 		slog.Error("web upload failed", "error", err)

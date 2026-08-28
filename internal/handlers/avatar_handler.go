@@ -131,7 +131,7 @@ func (h *AvatarHandler) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "file field is required")
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	avatar, err := h.service.Upload(r.Context(), userID, header.Filename, detectedType, header.Size, file)
 	switch {
@@ -188,7 +188,7 @@ func (h *AvatarHandler) GetAvatar(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	writeImage(w, contentType, avatar, body)
 }
@@ -209,7 +209,7 @@ func (h *AvatarHandler) GetUserAvatar(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to fetch avatar")
 		return
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	// GetLatestForUser всегда отдаёт оригинал (см. комментарий к методу
 	// в сервисе), поэтому Content-Type здесь — это MimeType самого файла.

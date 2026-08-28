@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/SatzhanDev/GophProfile/internal/domain"
 )
@@ -46,16 +46,27 @@ type AvatarRepository interface {
 	UpdateThumbnails(ctx context.Context, id uuid.UUID, thumbnails map[string]string) error
 }
 
+// pgxPool — минимальный набор методов, которые репозиторию нужны от пула
+// соединений pgx. *pgxpool.Pool ему соответствует "из коробки" — никакого
+// приведения типов на вызывающей стороне не требуется, а вот в тестах
+// вместо реального пула можно подставить pgxmock (см. avatar_repository_test.go).
+type pgxPool interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
 // PostgresAvatarRepository — реализация AvatarRepository поверх pgx.
 type PostgresAvatarRepository struct {
-	pool *pgxpool.Pool
+	pool pgxPool
 }
 
 // NewPostgresAvatarRepository создаёт репозиторий поверх готового пула соединений.
-func NewPostgresAvatarRepository(pool *pgxpool.Pool) *PostgresAvatarRepository {
+func NewPostgresAvatarRepository(pool pgxPool) *PostgresAvatarRepository {
 	return &PostgresAvatarRepository{pool: pool}
 }
 
+// Create реализует AvatarRepository.Create.
 func (r *PostgresAvatarRepository) Create(ctx context.Context, a *domain.Avatar) error {
 	if a.ID == uuid.Nil {
 		a.ID = uuid.New()
@@ -77,6 +88,7 @@ func (r *PostgresAvatarRepository) Create(ctx context.Context, a *domain.Avatar)
 	return nil
 }
 
+// GetByID реализует AvatarRepository.GetByID.
 func (r *PostgresAvatarRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Avatar, error) {
 	const query = `
 		SELECT id, user_id, file_name, mime_type, size_bytes, s3_key, thumbnail_s3_keys,
@@ -88,6 +100,7 @@ func (r *PostgresAvatarRepository) GetByID(ctx context.Context, id uuid.UUID) (*
 	return r.scanOne(r.pool.QueryRow(ctx, query, id))
 }
 
+// ListByUserID реализует AvatarRepository.ListByUserID.
 func (r *PostgresAvatarRepository) ListByUserID(ctx context.Context, userID string) ([]domain.Avatar, error) {
 	const query = `
 		SELECT id, user_id, file_name, mime_type, size_bytes, s3_key, thumbnail_s3_keys,
@@ -118,6 +131,7 @@ func (r *PostgresAvatarRepository) ListByUserID(ctx context.Context, userID stri
 	return avatars, nil
 }
 
+// GetLatestByUserID реализует AvatarRepository.GetLatestByUserID.
 func (r *PostgresAvatarRepository) GetLatestByUserID(ctx context.Context, userID string) (*domain.Avatar, error) {
 	const query = `
 		SELECT id, user_id, file_name, mime_type, size_bytes, s3_key, thumbnail_s3_keys,
@@ -131,6 +145,7 @@ func (r *PostgresAvatarRepository) GetLatestByUserID(ctx context.Context, userID
 	return r.scanOne(r.pool.QueryRow(ctx, query, userID))
 }
 
+// SoftDelete реализует AvatarRepository.SoftDelete.
 func (r *PostgresAvatarRepository) SoftDelete(ctx context.Context, id uuid.UUID) error {
 	const query = `
 		UPDATE avatars
@@ -149,6 +164,7 @@ func (r *PostgresAvatarRepository) SoftDelete(ctx context.Context, id uuid.UUID)
 	return nil
 }
 
+// UpdateProcessingStatus реализует AvatarRepository.UpdateProcessingStatus.
 func (r *PostgresAvatarRepository) UpdateProcessingStatus(ctx context.Context, id uuid.UUID, status domain.ProcessingStatus) error {
 	const query = `
 		UPDATE avatars
@@ -167,6 +183,7 @@ func (r *PostgresAvatarRepository) UpdateProcessingStatus(ctx context.Context, i
 	return nil
 }
 
+// UpdateThumbnails реализует AvatarRepository.UpdateThumbnails.
 func (r *PostgresAvatarRepository) UpdateThumbnails(ctx context.Context, id uuid.UUID, thumbnails map[string]string) error {
 	payload, err := json.Marshal(thumbnails)
 	if err != nil {

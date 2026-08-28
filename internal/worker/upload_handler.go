@@ -98,7 +98,7 @@ func (h *UploadHandler) generateThumbnails(ctx context.Context, avatar *domain.A
 	if err != nil {
 		return nil, fmt.Errorf("download original: %w", err)
 	}
-	defer original.Close()
+	defer func() { _ = original.Close() }()
 
 	// Читаем оригинал в память целиком: он не больше 10 МБ (лимит из ТЗ),
 	// а нам нужно декодировать его повторно для каждого размера миниатюры —

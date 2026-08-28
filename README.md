@@ -110,6 +110,49 @@ drag&drop, превью картинки до отправки и прогрес
 требует JS: HTML-формы не умеют отправлять `DELETE` и произвольные
 заголовки (`X-User-ID`), которых требует наш REST API.
 
+## Тесты и линтер
+
+`golangci-lint` — отдельная утилита, не часть стандартного `go`, ставится один раз:
+```
+brew install golangci-lint
+# либо, если brew не хочется:
+go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+```
+
+```
+go mod tidy       # подтянет testify/testcontainers-go, если ещё не подтянул
+make test         # юнит-тесты всех пакетов, без Docker и сети
+make cover        # процент покрытия по пакетам (после make test)
+make lint         # golangci-lint (go vet, staticcheck, errcheck и т.д.)
+```
+
+Юнит-тесты лежат рядом с кодом (`*_test.go` в `internal/...` и `pkg/...`) и
+проверяют логику через фейки — например, `internal/services/avatar_service_test.go`
+подставляет вместо реальных PostgreSQL/S3/RabbitMQ маленькие in-memory
+реализации тех же интерфейсов (`Storage`, `EventPublisher`, `repository.AvatarRepository`).
+Это стало возможным именно благодаря тому, что с самого начала эти
+зависимости передавались как интерфейсы, а не конкретные типы.
+
+`internal/repository/avatar_repository_test.go` — отдельный случай: сам
+`PostgresAvatarRepository` не подменить фейком целиком (это и есть
+реализация), поэтому здесь подменяется пул соединений через `pgxmock` —
+библиотеку, которая подделывает `pgx` на уровне запросов/строк, без
+реального PostgreSQL. Ради этого `PostgresAvatarRepository` стал зависеть
+от узкого интерфейса `pgxPool` (`QueryRow`/`Query`/`Exec`), а не от
+конкретного `*pgxpool.Pool` — тот же приём, что и везде в проекте.
+
+Отдельно — интеграционный тест на настоящем PostgreSQL в Docker-контейнере
+(через testcontainers-go и testify/suite), он лежит в `tests/integration/`
+и помечен build tag `integration`, поэтому не запускается вместе с
+обычными тестами:
+
+```
+make test-integration
+```
+
+Требует запущенный Docker — testcontainers сам поднимет и потом уничтожит
+контейнер с Postgres на время теста.
+
 ## Переменные окружения
 
 | Переменная               | По умолчанию  | Описание                     |
@@ -141,6 +184,6 @@ drag&drop, превью картинки до отправки и прогрес
 5. RabbitMQ: публикация событий после загрузки — **готово**
 6. Worker: генерация миниатюр, обработка удаления — **готово**
 7. Веб-интерфейс (загрузка + галерея) — **готово**
-8. Юнит-тесты, golangci-lint
+8. Юнит-тесты, golangci-lint — **готово**
 9. Docker / docker-compose
 10. Бонус: безопасность (magic bytes, rate limiting, CORS)

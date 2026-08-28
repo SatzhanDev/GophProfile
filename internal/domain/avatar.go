@@ -12,6 +12,7 @@ import (
 // UploadStatus описывает состояние загрузки оригинала файла в S3.
 type UploadStatus string
 
+// Возможные значения UploadStatus.
 const (
 	UploadStatusUploading UploadStatus = "uploading"
 	UploadStatusCompleted UploadStatus = "completed"
@@ -21,6 +22,7 @@ const (
 // ProcessingStatus описывает состояние асинхронной обработки (создание миниатюр).
 type ProcessingStatus string
 
+// Возможные значения ProcessingStatus.
 const (
 	ProcessingStatusPending    ProcessingStatus = "pending"
 	ProcessingStatusProcessing ProcessingStatus = "processing"
