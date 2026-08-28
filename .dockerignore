@@ -1,0 +1,14 @@
+# Держим build context маленьким и не тащим в образ лишнее.
+.git/
+.github/
+bin/
+*.md
+.env
+.env.*
+!.env.example
+coverage.out
+.golangci.yml
+.vscode/
+.idea/
+k8s/
+tests/

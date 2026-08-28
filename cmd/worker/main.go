@@ -41,16 +41,23 @@ func main() {
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelStartup()
 
-	// Миграции здесь не гоняем — их уже применил cmd/server при своём
-	// старте. Два процесса, независимо бегущие RunMigrations при каждом
-	// перезапуске, ничего не сломают (golang-migrate это позволяет), но
-	// это лишняя работа на ровном месте, раз сервер и так этим занимается.
 	dbPool, err := postgres.NewPool(startupCtx, cfg.Database.DSN())
 	if err != nil {
 		slog.Error("failed to connect to postgres", "error", err)
 		os.Exit(1)
 	}
 	defer dbPool.Close()
+
+	// В докере нет гарантии, какой контейнер — server или worker —
+	// реально стартует первым (depends_on гарантирует только порядок
+	// запуска процесса, а не то, что сервер уже успел применить миграции).
+	// RunMigrations идемпотентен: golang-migrate сам отслеживает, какие
+	// миграции уже применены, и повторный вызов — это просто no-op
+	// (ErrNoChange), а не ошибка и не повторное выполнение SQL.
+	if err := postgres.RunMigrations(cfg.MigrationsPath, cfg.Database.DSN()); err != nil {
+		slog.Error("failed to run migrations", "error", err)
+		os.Exit(1)
+	}
 
 	s3Client, err := s3.NewClient(
 		startupCtx,

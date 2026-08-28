@@ -1,3 +1,32 @@
+# YAML-якорь: переменные окружения, общие для server и worker, чтобы не
+# дублировать один и тот же блок дважды. &app-env объявляет "закладку",
+# <<: *app-env ниже — "вставь сюда всё, что там было".
+#
+# Обрати внимание: хосты и порты здесь ДРУГИЕ, чем в .env.example для
+# локального запуска (localhost:5434, localhost:9000, localhost:5673).
+# Внутри docker-сети контейнеры видят друг друга по имени сервиса
+# (postgres, minio, rabbitmq) и стучатся в их "родные" порты внутри
+# контейнера — 5432/9000/5672, а не в те, что мы прокинули наружу на хост.
+# Проброс портов (secция ports) нужен только для доступа С ТВОЕГО МАКА,
+# на общение контейнеров друг с другом он не влияет никак.
+x-app-env: &app-env
+  APP_ENV: production
+  SERVER_HOST: 0.0.0.0
+  SERVER_PORT: "8080"
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_USER: gophprofile
+  DB_PASSWORD: gophprofile
+  DB_NAME: gophprofile
+  DB_SSLMODE: disable
+  S3_ENDPOINT: minio:9000
+  S3_ACCESS_KEY: minioadmin
+  S3_SECRET_KEY: minioadmin
+  S3_BUCKET: avatars
+  S3_USE_SSL: "false"
+  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+  MIGRATIONS_PATH: /app/migrations
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -46,6 +75,44 @@ services:
       - "15673:15672" # веб-консоль (http://localhost:15673, guest/guest)
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: on-failure
+    environment:
+      <<: *app-env
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["./worker"]
+    restart: on-failure
+    environment:
+      <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_started
 
 volumes:
   postgres_data:
