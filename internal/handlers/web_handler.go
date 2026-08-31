@@ -1,23 +1,35 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/SatzhanDev/GophProfile/internal/domain"
 	"github.com/SatzhanDev/GophProfile/internal/services"
 )
+
+// webAvatarService — тот же приём, что и avatarService в avatar_handler.go:
+// WebHandler'у от сервиса нужны только Upload и ListForUser, остальные
+// методы AvatarService (GetFile, Delete и т.д.) ему не нужны вовсе —
+// узкий интерфейс явно показывает это в сигнатуре.
+type webAvatarService interface {
+	Upload(ctx context.Context, userID, fileName, detectedMimeType string, size int64, reader io.Reader) (*domain.Avatar, error)
+	ListForUser(ctx context.Context, userID string) ([]domain.Avatar, error)
+}
 
 // WebHandler обслуживает серверный веб-интерфейс (/web/...) — форму
 // загрузки и галерею. В отличие от AvatarHandler, здесь ответы — не JSON,
 // а HTML-страницы и редиректы, но бизнес-логику (AvatarService) переиспользует
 // ту же самую: веб-интерфейс не более чем ещё один клиент REST API.
 type WebHandler struct {
-	service       *services.AvatarService
+	service       webAvatarService
 	uploadTmpl    *template.Template
 	galleryTmpl   *template.Template
 	staticHandler http.Handler
@@ -26,7 +38,7 @@ type WebHandler struct {
 // NewWebHandler разбирает шаблоны один раз при старте (а не на каждый
 // запрос — html/template.Parse не бесплатный) и готовит файловый сервер
 // для статики.
-func NewWebHandler(service *services.AvatarService, templatesFS, staticFS fs.FS) (*WebHandler, error) {
+func NewWebHandler(service webAvatarService, templatesFS, staticFS fs.FS) (*WebHandler, error) {
 	uploadTmpl, err := template.ParseFS(templatesFS, "templates/upload.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse upload template: %w", err)

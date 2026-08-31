@@ -117,6 +117,7 @@ func (s *AvatarRepositorySuite) TestSoftDelete_HidesFromGetByID() {
 	ctx := context.Background()
 	avatar := &domain.Avatar{
 		UserID: "user-1", FileName: "a.jpg", MimeType: "image/jpeg", SizeBytes: 1, S3Key: "originals/a.jpg",
+		UploadStatus: domain.UploadStatusCompleted, ProcessingStatus: domain.ProcessingStatusPending,
 	}
 	s.Require().NoError(s.repo.Create(ctx, avatar))
 
@@ -129,12 +130,18 @@ func (s *AvatarRepositorySuite) TestSoftDelete_HidesFromGetByID() {
 func (s *AvatarRepositorySuite) TestGetLatestByUserID_ReturnsMostRecent() {
 	ctx := context.Background()
 
-	first := &domain.Avatar{UserID: "user-2", FileName: "a.jpg", MimeType: "image/jpeg", SizeBytes: 1, S3Key: "originals/a.jpg"}
+	first := &domain.Avatar{
+		UserID: "user-2", FileName: "a.jpg", MimeType: "image/jpeg", SizeBytes: 1, S3Key: "originals/a.jpg",
+		UploadStatus: domain.UploadStatusCompleted, ProcessingStatus: domain.ProcessingStatusPending,
+	}
 	s.Require().NoError(s.repo.Create(ctx, first))
 
 	time.Sleep(10 * time.Millisecond) // гарантируем разный created_at у второй записи
 
-	second := &domain.Avatar{UserID: "user-2", FileName: "b.jpg", MimeType: "image/jpeg", SizeBytes: 1, S3Key: "originals/b.jpg"}
+	second := &domain.Avatar{
+		UserID: "user-2", FileName: "b.jpg", MimeType: "image/jpeg", SizeBytes: 1, S3Key: "originals/b.jpg",
+		UploadStatus: domain.UploadStatusCompleted, ProcessingStatus: domain.ProcessingStatusPending,
+	}
 	s.Require().NoError(s.repo.Create(ctx, second))
 
 	latest, err := s.repo.GetLatestByUserID(ctx, "user-2")
@@ -144,7 +151,10 @@ func (s *AvatarRepositorySuite) TestGetLatestByUserID_ReturnsMostRecent() {
 
 func (s *AvatarRepositorySuite) TestUpdateThumbnailsAndStatus() {
 	ctx := context.Background()
-	avatar := &domain.Avatar{UserID: "user-3", FileName: "a.jpg", MimeType: "image/jpeg", SizeBytes: 1, S3Key: "originals/a.jpg"}
+	avatar := &domain.Avatar{
+		UserID: "user-3", FileName: "a.jpg", MimeType: "image/jpeg", SizeBytes: 1, S3Key: "originals/a.jpg",
+		UploadStatus: domain.UploadStatusCompleted, ProcessingStatus: domain.ProcessingStatusPending,
+	}
 	s.Require().NoError(s.repo.Create(ctx, avatar))
 
 	thumbs := map[string]string{"100x100": "thumbnails/a/100x100.jpg"}

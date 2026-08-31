@@ -58,6 +58,13 @@ func RunLoop[T any](ctx context.Context, name string, deliveries <-chan amqp.Del
 
 // runWithRetry вызывает handle до retryAttempts раз с экспоненциальной
 // паузой между попытками (1с, 2с, 4с) — как требует ТЗ.
+//
+// Пауза ждётся через select с ctx.Done(), а не через голый time.Sleep:
+// Sleep не реагирует на отмену контекста, поэтому при получении
+// SIGINT/SIGTERM во время паузы (до 4 секунд на последней попытке) main
+// завис бы, дожидаясь этого сна — притом что следующая попытка всё равно
+// провалится, раз контекст уже отменён. select возвращает управление
+// немедленно, как только контекст отменяется.
 func runWithRetry[T any](ctx context.Context, name string, handle func(context.Context, T) error, event T) error {
 	var err error
 	for attempt := 1; attempt <= retryAttempts; attempt++ {
@@ -68,7 +75,12 @@ func runWithRetry[T any](ctx context.Context, name string, handle func(context.C
 
 		slog.Warn("handler failed, will retry", "consumer", name, "attempt", attempt, "error", err)
 		if attempt < retryAttempts {
-			time.Sleep(retryBaseWait * time.Duration(1<<(attempt-1))) // 1s, 2s, 4s...
+			wait := retryBaseWait * time.Duration(1<<(attempt-1)) // 1s, 2s, 4s...
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
 	return err

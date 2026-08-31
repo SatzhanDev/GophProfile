@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +14,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/SatzhanDev/GophProfile/internal/domain"
-	"github.com/SatzhanDev/GophProfile/internal/repository"
 	"github.com/SatzhanDev/GophProfile/internal/services"
 	"github.com/SatzhanDev/GophProfile/pkg/placeholder"
 )
@@ -23,15 +23,33 @@ import (
 // GophProfile: сторонняя платформа всегда получает картинку, а не 404.
 const placeholderSize = 200
 
+// avatarService — минимальный интерфейс с ровно теми методами, которые
+// реально вызывает AvatarHandler. Хендлер работает с интерфейсом, а не с
+// конкретным *services.AvatarService — так его можно тестировать в
+// изоляции, подставив фейк прямо на этом уровне, не собирая настоящий
+// сервис с его собственными зависимостями (хотя в тестах мы всё равно
+// предпочитаем собрать настоящий AvatarService на фейковых repo/storage —
+// сам интерфейс от этого не бесполезен, он документирует контракт и
+// защищает от случайной связанности с деталями реализации сервиса).
+type avatarService interface {
+	Upload(ctx context.Context, userID, fileName, detectedMimeType string, size int64, reader io.Reader) (*domain.Avatar, error)
+	GetFile(ctx context.Context, id uuid.UUID, size string) (*domain.Avatar, io.ReadCloser, string, error)
+	GetLatestForUser(ctx context.Context, userID string) (*domain.Avatar, io.ReadCloser, error)
+	GetMetadata(ctx context.Context, id uuid.UUID) (*domain.Avatar, error)
+	ListForUser(ctx context.Context, userID string) ([]domain.Avatar, error)
+	Delete(ctx context.Context, id uuid.UUID, requesterUserID string) error
+	DeleteLatestForUser(ctx context.Context, userID, requesterUserID string) error
+}
+
 // AvatarHandler обрабатывает все HTTP-запросы, связанные с аватарками.
 type AvatarHandler struct {
-	service     *services.AvatarService
+	service     avatarService
 	placeholder []byte
 }
 
 // NewAvatarHandler создаёт AvatarHandler и один раз генерирует заглушку —
 // не на каждый запрос, а один раз при старте приложения.
-func NewAvatarHandler(service *services.AvatarService) *AvatarHandler {
+func NewAvatarHandler(service avatarService) *AvatarHandler {
 	ph, err := placeholder.Generate(placeholderSize)
 	if err != nil {
 		// Практически недостижимо (кодирование валидного image.RGBA в PNG
@@ -182,7 +200,7 @@ func (h *AvatarHandler) GetAvatar(w http.ResponseWriter, r *http.Request) {
 	avatar, body, contentType, err := h.service.GetFile(r.Context(), id, size)
 	if err != nil {
 		switch {
-		case errors.Is(err, repository.ErrAvatarNotFound):
+		case errors.Is(err, services.ErrAvatarNotFound):
 			writeError(w, http.StatusNotFound, "Avatar not found")
 		case errors.Is(err, services.ErrThumbnailNotAvailable):
 			writeError(w, http.StatusNotFound, "Requested size is not available yet")
@@ -205,7 +223,7 @@ func (h *AvatarHandler) GetUserAvatar(w http.ResponseWriter, r *http.Request) {
 
 	avatar, body, err := h.service.GetLatestForUser(r.Context(), userID)
 	if err != nil {
-		if errors.Is(err, repository.ErrAvatarNotFound) {
+		if errors.Is(err, services.ErrAvatarNotFound) {
 			h.writePlaceholder(w)
 			return
 		}
@@ -254,7 +272,7 @@ func (h *AvatarHandler) GetMetadata(w http.ResponseWriter, r *http.Request) {
 
 	avatar, err := h.service.GetMetadata(r.Context(), id)
 	if err != nil {
-		if errors.Is(err, repository.ErrAvatarNotFound) {
+		if errors.Is(err, services.ErrAvatarNotFound) {
 			writeError(w, http.StatusNotFound, "Avatar not found")
 			return
 		}
@@ -340,7 +358,7 @@ func handleDeleteError(w http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil:
 		return true
-	case errors.Is(err, repository.ErrAvatarNotFound):
+	case errors.Is(err, services.ErrAvatarNotFound):
 		writeError(w, http.StatusNotFound, "Avatar not found")
 	case errors.Is(err, services.ErrForbidden):
 		writeJSON(w, http.StatusForbidden, map[string]string{
