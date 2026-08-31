@@ -5,6 +5,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -54,6 +55,17 @@ type AvatarService struct {
 // NewAvatarService создаёт AvatarService.
 func NewAvatarService(repo repository.AvatarRepository, storage Storage, publisher EventPublisher) *AvatarService {
 	return &AvatarService{repo: repo, storage: storage, publisher: publisher}
+}
+
+// translateRepoErr переводит ошибки репозитория в собственные ошибки
+// сервиса. Без этого repository.ErrAvatarNotFound утекал бы наружу вплоть
+// до HTTP-хендлеров, а те не должны знать о деталях реализации хранилища —
+// ни что это именно PostgreSQL, ни структуру его ошибок.
+func translateRepoErr(err error) error {
+	if errors.Is(err, repository.ErrAvatarNotFound) {
+		return ErrAvatarNotFound
+	}
+	return err
 }
 
 // Upload проверяет лимиты, сохраняет оригинал в S3 и создаёт метаданные в БД.
@@ -124,7 +136,7 @@ const thumbnailContentType = "image/jpeg"
 func (s *AvatarService) GetFile(ctx context.Context, id uuid.UUID, size string) (*domain.Avatar, io.ReadCloser, string, error) {
 	avatar, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", translateRepoErr(err)
 	}
 
 	key := avatar.S3Key
@@ -152,7 +164,7 @@ func (s *AvatarService) GetFile(ctx context.Context, id uuid.UUID, size string) 
 func (s *AvatarService) GetLatestForUser(ctx context.Context, userID string) (*domain.Avatar, io.ReadCloser, error) {
 	avatar, err := s.repo.GetLatestByUserID(ctx, userID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, translateRepoErr(err)
 	}
 
 	body, err := s.storage.Download(ctx, avatar.S3Key)
@@ -165,7 +177,11 @@ func (s *AvatarService) GetLatestForUser(ctx context.Context, userID string) (*d
 
 // GetMetadata отдаёт только метаданные, без содержимого файла.
 func (s *AvatarService) GetMetadata(ctx context.Context, id uuid.UUID) (*domain.Avatar, error) {
-	return s.repo.GetByID(ctx, id)
+	avatar, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, translateRepoErr(err)
+	}
+	return avatar, nil
 }
 
 // ListForUser — все активные аватарки пользователя.
@@ -177,7 +193,7 @@ func (s *AvatarService) ListForUser(ctx context.Context, userID string) ([]domai
 func (s *AvatarService) Delete(ctx context.Context, id uuid.UUID, requesterUserID string) error {
 	avatar, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return err
+		return translateRepoErr(err)
 	}
 
 	if avatar.UserID != requesterUserID {
@@ -196,7 +212,7 @@ func (s *AvatarService) DeleteLatestForUser(ctx context.Context, userID, request
 
 	avatar, err := s.repo.GetLatestByUserID(ctx, userID)
 	if err != nil {
-		return err
+		return translateRepoErr(err)
 	}
 
 	return s.softDeleteAndPublish(ctx, avatar)

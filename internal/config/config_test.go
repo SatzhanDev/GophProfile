@@ -7,9 +7,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// setRequiredEnv выставляет чувствительные переменные, у которых больше
+// нет дефолтов (см. getEnvRequired) — без них Load вернёт ошибку. Тестам,
+// которые проверяют что-то другое, не нужно каждый раз думать про это,
+// поэтому вынесено в отдельный хелпер.
+func setRequiredEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("DB_PASSWORD", "test-password")
+	t.Setenv("S3_ACCESS_KEY", "test-access-key")
+	t.Setenv("S3_SECRET_KEY", "test-secret-key")
+	t.Setenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+}
+
 func TestLoad_Defaults(t *testing.T) {
-	// Ничего не задаём через env — Load должен вернуть ровно те значения
-	// по умолчанию, что задокументированы в README.
+	setRequiredEnv(t)
+
 	cfg, err := Load()
 	require.NoError(t, err)
 
@@ -24,6 +36,8 @@ func TestLoad_Defaults(t *testing.T) {
 }
 
 func TestLoad_OverridesFromEnv(t *testing.T) {
+	setRequiredEnv(t)
+
 	// t.Setenv сам восстанавливает исходное значение переменной после
 	// завершения теста — не нужно вручную подчищать за собой.
 	t.Setenv("APP_ENV", "production")
@@ -41,6 +55,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 }
 
 func TestLoad_InvalidIntValue(t *testing.T) {
+	setRequiredEnv(t)
 	t.Setenv("SERVER_PORT", "not-a-number")
 
 	_, err := Load()
@@ -48,8 +63,17 @@ func TestLoad_InvalidIntValue(t *testing.T) {
 }
 
 func TestLoad_InvalidBoolValue(t *testing.T) {
+	setRequiredEnv(t)
 	t.Setenv("S3_USE_SSL", "not-a-bool")
 
+	_, err := Load()
+	require.Error(t, err)
+}
+
+func TestLoad_MissingRequiredEnvVar(t *testing.T) {
+	// Ни одна из чувствительных переменных не задана — Load должен
+	// упасть сразу и явно (fail fast), а не тихо подставить публично
+	// известный дефолт вроде "minioadmin" или "guest:guest".
 	_, err := Load()
 	require.Error(t, err)
 }

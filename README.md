@@ -192,15 +192,15 @@ make test-integration
 | DB_HOST                    | localhost     | адрес PostgreSQL               |
 | DB_PORT                    | 5434          | порт PostgreSQL (не 5432/5433 — чтобы не конфликтовать с уже запущенными локальными Postgres) |
 | DB_USER                    | gophprofile   | пользователь PostgreSQL        |
-| DB_PASSWORD                | gophprofile   | пароль PostgreSQL              |
+| DB_PASSWORD                | *(обязателен, дефолта нет)* | пароль PostgreSQL |
 | DB_NAME                    | gophprofile   | имя базы данных                |
 | DB_SSLMODE                 | disable       | режим SSL для подключения      |
 | S3_ENDPOINT                | localhost:9000| адрес S3-совместимого хранилища (без схемы http/https) |
-| S3_ACCESS_KEY              | minioadmin    | access key                     |
-| S3_SECRET_KEY              | minioadmin    | secret key                     |
+| S3_ACCESS_KEY              | *(обязателен, дефолта нет)* | access key       |
+| S3_SECRET_KEY              | *(обязателен, дефолта нет)* | secret key       |
 | S3_BUCKET                  | avatars       | бакет, где хранятся файлы аватарок |
 | S3_USE_SSL                 | false         | использовать ли HTTPS до хранилища |
-| RABBITMQ_URL               | amqp://guest:guest@localhost:5673/ | адрес RabbitMQ (AMQP) |
+| RABBITMQ_URL               | *(обязателен, дефолта нет)* | адрес RabbitMQ (AMQP) |
 | CORS_ALLOWED_ORIGINS       | *             | разрешённые origin'ы через запятую |
 | RATE_LIMIT_RPS             | 5             | лимит запросов в секунду на один IP (API) |
 | RATE_LIMIT_BURST           | 10            | сколько запросов можно сделать одним всплеском |
@@ -224,6 +224,14 @@ make test-integration
   Реализовано вручную на `golang.org/x/time/rate`, без сторонних
   rate-limiting-библиотек — так виден сам алгоритм, а не только вызов
   готовой функции.
+- **Никаких дефолтов для чувствительных параметров.** `DB_PASSWORD`,
+  `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `RABBITMQ_URL` не имеют значений по
+  умолчанию в коде — раньше там были общеизвестные дефолты вроде
+  `minioadmin`/`guest:guest`, и если забыть задать их явно при деплое,
+  сервис незаметно стартовал бы с небезопасными реквизитами. Теперь
+  вместо этого `config.Load()` возвращает ошибку сразу при старте
+  (fail fast), если хоть один из них не задан. Для локальной разработки
+  ничего не меняется — значения по-прежнему берутся из `.env`.
 - **CORS** (`github.com/go-chi/cors`) — список разрешённых origin'ов
   настраивается через `CORS_ALLOWED_ORIGINS`, по умолчанию `*` (разработка).
 

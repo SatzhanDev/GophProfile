@@ -3,6 +3,11 @@ package services
 import "errors"
 
 var (
+	// ErrAvatarNotFound — аватарки с таким id нет или она уже удалена.
+	// Это "перевод" repository.ErrAvatarNotFound на уровень сервиса:
+	// вызывающий код (хендлеры) не должен знать о деталях реализации
+	// хранилища — ни что это PostgreSQL, ни структуру его ошибок.
+	ErrAvatarNotFound = errors.New("avatar not found")
 	// ErrFileTooLarge — файл больше MaxAvatarSize.
 	ErrFileTooLarge = errors.New("file too large")
 	// ErrUnsupportedType — MIME-тип не входит в allowedMimeTypes.
