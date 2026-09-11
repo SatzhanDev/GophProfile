@@ -10,12 +10,19 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/SatzhanDev/GophProfile/pkg/broker"
 )
 
 const (
 	retryAttempts = 3
 	retryBaseWait = time.Second
 )
+
+var tracer = otel.Tracer("worker")
 
 // RunLoop читает сообщения из deliveries, разбирает JSON-тело в T и
 // передаёт в handle. Дженерик здесь ровно для того, чтобы не копировать
@@ -37,12 +44,22 @@ func RunLoop[T any](ctx context.Context, name string, deliveries <-chan amqp.Del
 			continue
 		}
 
-		handleErr := runWithRetry(ctx, name, handle, event)
+		// Достаём контекст трейсинга из заголовков сообщения — если
+		// publisher положил его туда (см. broker.Publisher.Publish),
+		// span ниже станет продолжением ТОГО ЖЕ трейса, что начался ещё
+		// на HTTP-запросе, который в итоге привёл к публикации события.
+		msgCtx := otel.GetTextMapPropagator().Extract(ctx, broker.HeaderCarrier(d.Headers))
+		msgCtx, span := tracer.Start(msgCtx, "worker.handle_"+name, trace.WithSpanKind(trace.SpanKindConsumer))
+
+		handleErr := runWithRetry(msgCtx, name, handle, event)
 
 		if handleErr != nil {
-			slog.Error("handler failed after all retries, giving up",
+			span.RecordError(handleErr)
+			span.SetStatus(codes.Error, handleErr.Error())
+			slog.ErrorContext(msgCtx, "handler failed after all retries, giving up",
 				"consumer", name, "message_id", d.MessageId, "error", handleErr)
 		}
+		span.End()
 
 		// Подтверждаем сообщение в любом случае. Свой ретрай мы уже
 		// исчерпали внутри runWithRetry; если бы мы сделали Nack с
@@ -73,7 +90,7 @@ func runWithRetry[T any](ctx context.Context, name string, handle func(context.C
 			return nil
 		}
 
-		slog.Warn("handler failed, will retry", "consumer", name, "attempt", attempt, "error", err)
+		slog.WarnContext(ctx, "handler failed, will retry", "consumer", name, "attempt", attempt, "error", err)
 		if attempt < retryAttempts {
 			wait := retryBaseWait * time.Duration(1<<(attempt-1)) // 1s, 2s, 4s...
 			select {

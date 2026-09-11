@@ -68,6 +68,16 @@ type RateLimitConfig struct {
 	Burst             int
 }
 
+// TelemetryConfig содержит настройки трейсинга (OpenTelemetry → Jaeger).
+// ServiceName нарочно может быть пустым: server и worker — два разных
+// процесса, читающих одну и ту же конфигурацию, и у них должны быть разные
+// имена в Jaeger (иначе их трейсы будет не отличить друг от друга) — за
+// дефолтное имя для каждого процесса отвечает его собственный main.go.
+type TelemetryConfig struct {
+	ServiceName  string
+	OTLPEndpoint string
+}
+
 // Config — корневая структура конфигурации всего приложения.
 type Config struct {
 	Env            string
@@ -77,6 +87,7 @@ type Config struct {
 	Broker         BrokerConfig
 	CORS           CORSConfig
 	RateLimit      RateLimitConfig
+	Telemetry      TelemetryConfig
 	MigrationsPath string
 }
 
@@ -173,6 +184,10 @@ func Load() (*Config, error) {
 		RateLimit: RateLimitConfig{
 			RequestsPerSecond: rateLimitRPS,
 			Burst:             rateLimitBurst,
+		},
+		Telemetry: TelemetryConfig{
+			ServiceName:  getEnv("OTEL_SERVICE_NAME", ""),
+			OTLPEndpoint: getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
 		},
 		MigrationsPath: getEnv("MIGRATIONS_PATH", "migrations"),
 	}

@@ -22,15 +22,16 @@ import (
 	"github.com/SatzhanDev/GophProfile/pkg/broker"
 	"github.com/SatzhanDev/GophProfile/pkg/postgres"
 	"github.com/SatzhanDev/GophProfile/pkg/s3"
+	"github.com/SatzhanDev/GophProfile/pkg/telemetry"
 )
 
-func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
+// defaultServiceName — своё имя для worker в Jaeger, отдельное от
+// "gophprofile-server" (см. cmd/server/main.go), чтобы трейсы от двух
+// процессов не путались друг с другом при просмотре в Jaeger UI.
+const defaultServiceName = "gophprofile-worker"
 
-	if err := godotenv.Load(); err != nil {
-		slog.Debug("no .env file found, using process environment", "error", err)
-	}
+func main() {
+	envErr := godotenv.Load()
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -38,8 +39,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	logger := slog.New(telemetry.NewTraceHandler(slog.NewJSONHandler(os.Stdout, nil)))
+	slog.SetDefault(logger)
+
+	if envErr != nil {
+		slog.Debug("no .env file found, using process environment", "error", envErr)
+	}
+
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelStartup()
+
+	serviceName := cfg.Telemetry.ServiceName
+	if serviceName == "" {
+		serviceName = defaultServiceName
+	}
+	shutdownTracer, err := telemetry.InitTracer(startupCtx, serviceName, cfg.Telemetry.OTLPEndpoint)
+	if err != nil {
+		slog.Error("failed to init tracer", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := shutdownTracer(context.Background()); err != nil {
+			slog.Error("failed to shutdown tracer", "error", err)
+		}
+	}()
 
 	dbPool, err := postgres.NewPool(startupCtx, cfg.Database.DSN())
 	if err != nil {

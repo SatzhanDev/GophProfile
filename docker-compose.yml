@@ -28,6 +28,10 @@ x-app-env: &app-env
   CORS_ALLOWED_ORIGINS: "*"
   RATE_LIMIT_RPS: "5"
   RATE_LIMIT_BURST: "10"
+  # OTEL_SERVICE_NAME намеренно не задан здесь: у server и worker он
+  # разный (см. defaultServiceName в их cmd/*/main.go), а тут переменные
+  # общие на оба сервиса.
+  OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
   MIGRATIONS_PATH: /app/migrations
 
 services:
@@ -89,6 +93,18 @@ services:
       timeout: 5s
       retries: 5
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.54
+    restart: unless-stopped
+    environment:
+      # По умолчанию all-in-one принимает трейсы только в своём "родном"
+      # формате (Jaeger protocol); OTLP — уже отраслевой стандарт, на нём
+      # и построен наш pkg/telemetry, поэтому явно включаем приём OTLP.
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # веб-UI Jaeger — http://localhost:16686
+      - "4317:4317"   # OTLP/gRPC — сюда шлёт трейсы наше приложение
+
   server:
     build:
       context: .
@@ -105,6 +121,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+      jaeger:
+        condition: service_started
 
   worker:
     build:
@@ -120,6 +138,8 @@ services:
       rabbitmq:
         condition: service_healthy
       minio:
+        condition: service_started
+      jaeger:
         condition: service_started
 
 volumes:

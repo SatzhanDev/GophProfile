@@ -4,7 +4,7 @@
 
 ## Стек
 
-Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker.
+Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker, OpenTelemetry + Jaeger.
 
 ## Структура проекта
 
@@ -18,6 +18,7 @@ internal/handlers/  — HTTP-обработчики
 internal/repository/— доступ к PostgreSQL
 internal/services/  — бизнес-логика
 internal/worker/    — обработчики событий брокера
+pkg/telemetry/  — трейсинг (OpenTelemetry → Jaeger) и корреляция логов
 pkg/            — переиспользуемые пакеты общего назначения
 web/            — веб-интерфейс: HTML-шаблоны, CSS, JS (вшиты в бинарник через go:embed)
 migrations/     — SQL-миграции
@@ -235,6 +236,35 @@ make test-integration
 - **CORS** (`github.com/go-chi/cors`) — список разрешённых origin'ов
   настраивается через `CORS_ALLOWED_ORIGINS`, по умолчанию `*` (разработка).
 
+## Трейсинг (OpenTelemetry → Jaeger)
+
+```
+docker compose up -d jaeger   # если работаешь в гибридном режиме
+```
+Открой http://localhost:16686 (Jaeger UI), выбери сервис `gophprofile-server`
+или `gophprofile-worker` и посмотри трейсы.
+
+Что покрыто (`pkg/telemetry/`):
+- **HTTP** — весь роутер обёрнут в `otelhttp.NewHandler` (`cmd/server/main.go`):
+  span на каждый запрос, с извлечением `traceparent` из входящих заголовков.
+- **PostgreSQL** — `telemetry.PgxTracer` подключается к пулу один раз
+  в `pkg/postgres.NewPool` и автоматически оборачивает в span **каждый**
+  SQL-запрос — ни один метод репозитория трогать не пришлось.
+- **S3** — ручные спаны вокруг `Upload`/`Download`/`Delete` в `pkg/s3`.
+- **RabbitMQ + распространение контекста между процессами** — при публикации
+  (`pkg/broker.Publisher.Publish`) контекст трейсинга внедряется прямо
+  в заголовки AMQP-сообщения; воркер (`internal/worker.RunLoop`) достаёт его
+  оттуда и продолжает **тот же трейс**. Поэтому путь "HTTP-запрос → публикация
+  события → обработка в отдельном процессе-воркере" виден в Jaeger одной
+  цепочкой, хотя это два независимых процесса.
+- **Бизнес-логика** — `AvatarService.Upload` оборачивается в span
+  `upload_avatar` с атрибутами `user_id`/`file_name`/`file_size`/`avatar_id`
+  (пример ровно по ТЗ).
+- **Корреляция логов с трейсами** — `telemetry.TraceHandler` оборачивает
+  `slog`-хендлер и на каждый вызов `slog.*Context(ctx, ...)` добавляет
+  `trace_id`/`span_id` в JSON лога. Увидев ошибку в логах — можно по
+  `trace_id` открыть в Jaeger весь путь запроса, который к ней привёл.
+
 ## План инкрементов
 
 1. Скелет проекта, конфиг, `/health` — **готово**
@@ -247,3 +277,11 @@ make test-integration
 8. Юнит-тесты, golangci-lint — **готово**
 9. Docker / docker-compose — **готово**
 10. Бонус: безопасность (magic bytes, rate limiting, CORS) — **готово**
+
+### Спринт 2: наблюдаемость
+
+1. Трейсинг: OpenTelemetry (HTTP, БД, S3, брокер, распространение контекста) + Jaeger, корреляция логов — **готово**
+2. Метрики: Prometheus (RED-метрики, бизнес- и инфраструктурные метрики)
+3. Логирование: Grafana Loki + Promtail
+4. Дашборды в Grafana
+5. Бонус: алертинг через Prometheus Alertmanager

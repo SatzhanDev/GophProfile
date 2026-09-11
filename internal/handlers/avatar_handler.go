@@ -170,7 +170,7 @@ func (h *AvatarHandler) UploadAvatar(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	case err != nil:
-		slog.Error("failed to upload avatar", "error", err)
+		slog.ErrorContext(r.Context(), "failed to upload avatar", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to upload avatar")
 		return
 	}
@@ -205,7 +205,7 @@ func (h *AvatarHandler) GetAvatar(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, services.ErrThumbnailNotAvailable):
 			writeError(w, http.StatusNotFound, "Requested size is not available yet")
 		default:
-			slog.Error("failed to fetch avatar", "error", err)
+			slog.ErrorContext(r.Context(), "failed to fetch avatar", "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to fetch avatar")
 		}
 		return
@@ -227,7 +227,7 @@ func (h *AvatarHandler) GetUserAvatar(w http.ResponseWriter, r *http.Request) {
 			h.writePlaceholder(w)
 			return
 		}
-		slog.Error("failed to fetch user avatar", "error", err)
+		slog.ErrorContext(r.Context(), "failed to fetch user avatar", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to fetch avatar")
 		return
 	}
@@ -276,7 +276,7 @@ func (h *AvatarHandler) GetMetadata(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "Avatar not found")
 			return
 		}
-		slog.Error("failed to fetch avatar metadata", "error", err)
+		slog.ErrorContext(r.Context(), "failed to fetch avatar metadata", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to fetch avatar metadata")
 		return
 	}
@@ -290,7 +290,7 @@ func (h *AvatarHandler) ListUserAvatars(w http.ResponseWriter, r *http.Request) 
 
 	avatars, err := h.service.ListForUser(r.Context(), userID)
 	if err != nil {
-		slog.Error("failed to list avatars", "error", err)
+		slog.ErrorContext(r.Context(), "failed to list avatars", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to list avatars")
 		return
 	}
@@ -322,7 +322,7 @@ func (h *AvatarHandler) DeleteAvatar(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err = h.service.Delete(r.Context(), id, userID)
-	if !handleDeleteError(w, err) {
+	if !handleDeleteError(r.Context(), w, err) {
 		return
 	}
 
@@ -344,7 +344,7 @@ func (h *AvatarHandler) DeleteUserAvatar(w http.ResponseWriter, r *http.Request)
 	}
 
 	err := h.service.DeleteLatestForUser(r.Context(), userID, requesterID)
-	if !handleDeleteError(w, err) {
+	if !handleDeleteError(r.Context(), w, err) {
 		return
 	}
 
@@ -354,7 +354,7 @@ func (h *AvatarHandler) DeleteUserAvatar(w http.ResponseWriter, r *http.Request)
 // handleDeleteError разбирает ошибку, общую для DeleteAvatar и
 // DeleteUserAvatar, и сама пишет ответ клиенту в случае ошибки.
 // Возвращает true, если ошибки не было и можно продолжать (писать 204).
-func handleDeleteError(w http.ResponseWriter, err error) bool {
+func handleDeleteError(ctx context.Context, w http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil:
 		return true
@@ -366,7 +366,7 @@ func handleDeleteError(w http.ResponseWriter, err error) bool {
 			"details": "You can only delete your own avatars",
 		})
 	default:
-		slog.Error("failed to delete avatar", "error", err)
+		slog.ErrorContext(ctx, "failed to delete avatar", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to delete avatar")
 	}
 	return false

@@ -11,10 +11,15 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/SatzhanDev/GophProfile/internal/domain"
 	"github.com/SatzhanDev/GophProfile/internal/repository"
 )
+
+var tracer = otel.Tracer("avatar-service")
 
 // MaxAvatarSize — лимит на размер загружаемого файла, 10 МБ по ТЗ.
 const MaxAvatarSize = 10 << 20
@@ -76,12 +81,27 @@ func translateRepoErr(err error) error {
 // размера здесь — это уже вторая линия защиты: основную отсечку делает
 // http.MaxBytesReader ещё до захода в этот метод.
 func (s *AvatarService) Upload(ctx context.Context, userID, fileName, detectedMimeType string, size int64, reader io.Reader) (*domain.Avatar, error) {
+	// Спан на уровне бизнес-операции, а не только на уровне HTTP/БД/S3 —
+	// в Jaeger он станет "родителем" для всех спанов запросов к БД, S3
+	// и публикации в очередь внутри этого метода, и с его атрибутов
+	// удобно начинать разбор конкретной загрузки (кто грузил, что грузил).
+	ctx, span := tracer.Start(ctx, "upload_avatar")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("user_id", userID),
+		attribute.String("file_name", fileName),
+		attribute.Int64("file_size", size),
+	)
+
 	if size > MaxAvatarSize {
+		span.SetStatus(codes.Error, "file too large")
 		return nil, ErrFileTooLarge
 	}
 
 	ext, ok := allowedMimeTypes[detectedMimeType]
 	if !ok {
+		span.SetStatus(codes.Error, "unsupported file type")
 		return nil, ErrUnsupportedType
 	}
 
@@ -95,13 +115,18 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName, detectedMi
 		ProcessingStatus: domain.ProcessingStatusPending,
 	}
 	avatar.S3Key = fmt.Sprintf("originals/%s%s", avatar.ID, ext)
+	span.SetAttributes(attribute.String("avatar_id", avatar.ID.String()))
 
 	if err := s.storage.Upload(ctx, avatar.S3Key, reader, size, detectedMimeType); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "s3 upload failed")
 		return nil, fmt.Errorf("upload original to s3: %w", err)
 	}
 	avatar.UploadStatus = domain.UploadStatusCompleted
 
 	if err := s.repo.Create(ctx, avatar); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "save metadata failed")
 		return nil, fmt.Errorf("save avatar metadata: %w", err)
 	}
 
@@ -117,7 +142,7 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName, detectedMi
 		S3Key:    avatar.S3Key,
 	}
 	if err := s.publisher.Publish(ctx, domain.RoutingKeyAvatarUploaded, event); err != nil {
-		slog.Error("failed to publish avatar upload event", "avatar_id", avatar.ID, "error", err)
+		slog.ErrorContext(ctx, "failed to publish avatar upload event", "avatar_id", avatar.ID, "error", err)
 	}
 
 	return avatar, nil
@@ -238,7 +263,7 @@ func (s *AvatarService) softDeleteAndPublish(ctx context.Context, avatar *domain
 
 	event := domain.AvatarDeleteEvent{AvatarID: avatar.ID.String(), S3Keys: keys}
 	if err := s.publisher.Publish(ctx, domain.RoutingKeyAvatarDeleted, event); err != nil {
-		slog.Error("failed to publish avatar delete event", "avatar_id", avatar.ID, "error", err)
+		slog.ErrorContext(ctx, "failed to publish avatar delete event", "avatar_id", avatar.ID, "error", err)
 	}
 
 	return nil

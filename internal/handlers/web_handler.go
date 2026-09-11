@@ -77,7 +77,7 @@ func (h *WebHandler) UploadForm(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := h.uploadTmpl.Execute(w, data); err != nil {
-		slog.Error("failed to render upload template", "error", err)
+		slog.ErrorContext(r.Context(), "failed to render upload template", "error", err)
 	}
 }
 
@@ -112,7 +112,7 @@ func (h *WebHandler) UploadSubmit(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = file.Close() }()
 
 	if _, err := h.service.Upload(r.Context(), userID, header.Filename, detectedType, header.Size, file); err != nil {
-		slog.Error("web upload failed", "error", err)
+		slog.ErrorContext(r.Context(), "web upload failed", "error", err)
 		http.Error(w, "upload failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -137,7 +137,7 @@ func (h *WebHandler) GalleryPage(w http.ResponseWriter, r *http.Request) {
 
 	avatars, err := h.service.ListForUser(r.Context(), userID)
 	if err != nil {
-		slog.Error("failed to list avatars for gallery", "error", err)
+		slog.ErrorContext(r.Context(), "failed to list avatars for gallery", "error", err)
 		http.Error(w, "failed to load gallery", http.StatusInternalServerError)
 		return
 	}
@@ -153,7 +153,7 @@ func (h *WebHandler) GalleryPage(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := h.galleryTmpl.Execute(w, data); err != nil {
-		slog.Error("failed to render gallery template", "error", err)
+		slog.ErrorContext(r.Context(), "failed to render gallery template", "error", err)
 	}
 }
 
