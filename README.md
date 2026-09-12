@@ -4,7 +4,7 @@
 
 ## Стек
 
-Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker, OpenTelemetry + Jaeger, Prometheus.
+Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker, OpenTelemetry + Jaeger, Prometheus, Grafana + Loki + Promtail.
 
 ## Структура проекта
 
@@ -23,7 +23,7 @@ pkg/metrics/    — Prometheus-метрики (RED, бизнес-, инфрас�
 pkg/            — переиспользуемые пакеты общего назначения
 web/            — веб-интерфейс: HTML-шаблоны, CSS, JS (вшиты в бинарник через go:embed)
 migrations/     — SQL-миграции
-docker/         — Dockerfile (multi-stage сборка server+worker)
+docker/         — Dockerfile (multi-stage сборка server+worker), конфиги Prometheus/Promtail/Grafana
 k8s/            — манифесты Kubernetes
 tests/          — интеграционные тесты
 ```
@@ -309,6 +309,50 @@ histogram_quantile(0.95, rate(gophprofile_http_request_duration_seconds_bucket[5
 gophprofile_avatar_storage_bytes                            # текущий объём хранилища
 ```
 
+## Логирование (Grafana Loki + Promtail)
+
+```
+docker compose up -d loki promtail grafana
+```
+Открой http://localhost:3000 (Grafana, анонимный вход с правами Admin — см.
+`GF_AUTH_ANONYMOUS_*` в docker-compose.yml) → Explore → источник данных Loki →
+запрос `{service="server"}` — увидишь JSON-логи сервера в реальном времени.
+
+Как это устроено — в отличие от трейсинга и метрик, здесь **не понадобилось
+менять ни строчки Go-кода**: структурные JSON-логи с `trace_id`/`span_id`
+уже писались в stdout с самого первого инкремента наблюдаемости
+(`pkg/telemetry/logging.go`), а Docker сам сохраняет stdout любого контейнера
+в файл на диске. Дальше — чисто инфраструктурная часть:
+
+- **Promtail** (`docker/promtail.yml`) через Docker API (`docker_sd_configs`)
+  узнаёт, какие контейнеры вообще запущены, находит их лог-файлы на диске
+  (`/var/lib/docker/containers/<id>/*-json.log`) и построчно отправляет
+  их в Loki. Лейблы `container`/`service` берутся из имени и
+  compose-лейблов контейнера (`service` — это имя сервиса из
+  docker-compose.yml: `server`, `worker`, `postgres` и т.д., а не OTEL-имя
+  из Jaeger) — это то, по чему потом фильтруют в Grafana (`{service="worker"}`).
+- Стадия пайплайна `docker: {}` снимает "конверт" самого Docker
+  (`{"log": "...", "stream": "stdout", "time": "..."}`), а следующая
+  `json:` уже разбирает наш собственный JSON от `slog` и достаёт из него
+  `level` — он превращается в лейбл Loki (`| level="error"`), у него всего
+  4 возможных значения, это дёшево.
+- **`trace_id` лейблом не становится** — сознательно. Лейблы в Loki
+  устроены так же, как в Prometheus: каждое новое значение заводит
+  отдельный "стрим" на диске, а `trace_id` уникален на каждый запрос —
+  сделай его лейблом, и получится ровно тот cardinality explosion, который
+  уже разбирали для Prometheus и UUID в путях (`pkg/metrics/http_middleware.go`).
+  Найти логи конкретного трейса всё равно можно — просто фильтром на
+  момент запроса, а не заранее проиндексированным лейблом:
+  ```
+  {service="server"} | json | trace_id="<id из Jaeger>"
+  ```
+  Это и есть обещанная в трейсинге связка: открыл трейс в Jaeger →
+  скопировал `trace_id` → нашёл по нему все логи в Grafana.
+- **Grafana** пока используется только как окно в Loki (Explore) — сама
+  Grafana и её datasource'ы (Prometheus/Loki/Jaeger) провижинятся файлом
+  `docker/grafana/provisioning/datasources/datasources.yml` при старте,
+  без единого клика в UI. Полноценные дашборды — предмет следующего инкремента.
+
 ## План инкрементов
 
 1. Скелет проекта, конфиг, `/health` — **готово**
@@ -326,6 +370,6 @@ gophprofile_avatar_storage_bytes                            # текущий о�
 
 1. Трейсинг: OpenTelemetry (HTTP, БД, S3, брокер, распространение контекста) + Jaeger, корреляция логов — **готово**
 2. Метрики: Prometheus (RED-метрики, бизнес- и инфраструктурные метрики) — **готово**
-3. Логирование: Grafana Loki + Promtail
+3. Логирование: Grafana Loki + Promtail — **готово**
 4. Дашборды в Grafana
 5. Бонус: алертинг через Prometheus Alertmanager
