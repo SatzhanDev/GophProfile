@@ -33,6 +33,10 @@ x-app-env: &app-env
   # общие на оба сервиса.
   OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
   MIGRATIONS_PATH: /app/migrations
+  # У worker свой отдельный HTTP-сервер только под /metrics (см.
+  # cmd/worker/main.go) — server эту переменную получает тоже (общий
+  # блок), но не использует: его /metrics висит на SERVER_PORT.
+  METRICS_PORT: "9100"
 
 services:
   postgres:
@@ -132,6 +136,8 @@ services:
     restart: on-failure
     environment:
       <<: *app-env
+    ports:
+      - "9100:9100" # /metrics воркера — для отладки с хоста, curl localhost:9100/metrics
     depends_on:
       postgres:
         condition: service_healthy
@@ -142,7 +148,20 @@ services:
       jaeger:
         condition: service_started
 
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090" # веб-UI и API Prometheus — http://localhost:9090
+    depends_on:
+      - server
+      - worker
+
 volumes:
   postgres_data:
   minio_data:
   rabbitmq_data:
+  prometheus_data:

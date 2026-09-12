@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/SatzhanDev/GophProfile/internal/domain"
 	"github.com/SatzhanDev/GophProfile/internal/repository"
+	"github.com/SatzhanDev/GophProfile/pkg/metrics"
 )
 
 var tracer = otel.Tracer("avatar-service")
@@ -94,13 +96,26 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName, detectedMi
 		attribute.Int64("file_size", size),
 	)
 
+	// outcome — метка для AvatarUploadsTotal; по умолчанию "success" и
+	// переключается на конкретную причину на каждой ветке отказа ниже.
+	// defer гарантирует, что метрика запишется ровно один раз, каким бы
+	// путём функция ни вышла — через return на пятой строке или на сотой.
+	start := time.Now()
+	outcome := "success"
+	defer func() {
+		metrics.AvatarUploadDuration.Observe(time.Since(start).Seconds())
+		metrics.AvatarUploadsTotal.WithLabelValues(outcome).Inc()
+	}()
+
 	if size > MaxAvatarSize {
+		outcome = "validation_error"
 		span.SetStatus(codes.Error, "file too large")
 		return nil, ErrFileTooLarge
 	}
 
 	ext, ok := allowedMimeTypes[detectedMimeType]
 	if !ok {
+		outcome = "validation_error"
 		span.SetStatus(codes.Error, "unsupported file type")
 		return nil, ErrUnsupportedType
 	}
@@ -118,13 +133,19 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName, detectedMi
 	span.SetAttributes(attribute.String("avatar_id", avatar.ID.String()))
 
 	if err := s.storage.Upload(ctx, avatar.S3Key, reader, size, detectedMimeType); err != nil {
+		outcome = "storage_error"
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "s3 upload failed")
 		return nil, fmt.Errorf("upload original to s3: %w", err)
 	}
 	avatar.UploadStatus = domain.UploadStatusCompleted
+	// Файл в S3 уже физически лежит, поэтому сразу учитываем его в оценке
+	// занятого места — даже если следующий шаг (запись в БД) провалится и
+	// мы вернём ошибку: место в S3 всё равно занято, метрика должна это отражать.
+	metrics.AvatarStorageBytes.Add(float64(size))
 
 	if err := s.repo.Create(ctx, avatar); err != nil {
+		outcome = "storage_error"
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "save metadata failed")
 		return nil, fmt.Errorf("save avatar metadata: %w", err)
@@ -252,8 +273,16 @@ func (s *AvatarService) DeleteLatestForUser(ctx context.Context, userID, request
 // как и при загрузке, ошибку публикации не считаем фатальной для запроса.
 func (s *AvatarService) softDeleteAndPublish(ctx context.Context, avatar *domain.Avatar) error {
 	if err := s.repo.SoftDelete(ctx, avatar.ID); err != nil {
+		metrics.AvatarDeletesTotal.WithLabelValues("storage_error").Inc()
 		return err
 	}
+	metrics.AvatarDeletesTotal.WithLabelValues("success").Inc()
+	// Симметрично AvatarStorageBytes.Add в Upload: воркер физически удалит
+	// файл из S3 позже и асинхронно, но с точки зрения продукта место
+	// освобождается уже сейчас — запись помечена удалённой, и API её больше
+	// никому не отдаст. Считаем только байты оригинала — по той же причине,
+	// что и при загрузке: размеры миниатюр в БД не хранятся, только их ключи.
+	metrics.AvatarStorageBytes.Sub(float64(avatar.SizeBytes))
 
 	keys := make([]string, 0, 1+len(avatar.ThumbnailS3Keys))
 	keys = append(keys, avatar.S3Key)

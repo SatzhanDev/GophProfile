@@ -32,6 +32,10 @@ COPY --from=builder /app/migrations ./migrations
 ENV MIGRATIONS_PATH=/app/migrations
 
 EXPOSE 8080
+# 9100 — /metrics отдельного HTTP-сервера воркера (см. cmd/worker/main.go).
+# server этот порт не слушает, но EXPOSE ничего не стоит и документирует
+# оба возможных случая использования образа сразу в одном месте.
+EXPOSE 9100
 
 # По умолчанию контейнер запускает HTTP-сервер; для воркера
 # docker-compose.yml переопределяет команду на ["./worker"].

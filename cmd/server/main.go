@@ -20,6 +20,7 @@ import (
 	"github.com/SatzhanDev/GophProfile/internal/repository"
 	"github.com/SatzhanDev/GophProfile/internal/services"
 	"github.com/SatzhanDev/GophProfile/pkg/broker"
+	"github.com/SatzhanDev/GophProfile/pkg/metrics"
 	"github.com/SatzhanDev/GophProfile/pkg/postgres"
 	"github.com/SatzhanDev/GophProfile/pkg/s3"
 	"github.com/SatzhanDev/GophProfile/pkg/telemetry"
@@ -155,6 +156,10 @@ func main() {
 	// это позволяет сделать graceful shutdown вместо мгновенного убийства процесса.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Периодически публикуем состояние пула соединений с Postgres —
+	// см. metrics.CollectDBPoolStats. Останавливается сам вместе с ctx.
+	go metrics.CollectDBPoolStats(ctx, dbPool, 15*time.Second)
 
 	go func() {
 		slog.Info("starting server", "address", srv.Addr)

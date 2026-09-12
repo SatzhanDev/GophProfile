@@ -31,7 +31,8 @@ const (
 )
 
 // Avatar — доменная модель аватарки. Один в один описывает строку таблицы
-// avatars из миграции 000001_create_avatars_table.
+// avatars из миграций 000001_create_avatars_table (сама таблица) и
+// 000002_avatars_status_enums (ENUM-типы для статусов).
 type Avatar struct {
 	ID     uuid.UUID
 	UserID string

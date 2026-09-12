@@ -6,7 +6,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -14,12 +17,14 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/SatzhanDev/GophProfile/internal/config"
 	"github.com/SatzhanDev/GophProfile/internal/domain"
 	"github.com/SatzhanDev/GophProfile/internal/repository"
 	"github.com/SatzhanDev/GophProfile/internal/worker"
 	"github.com/SatzhanDev/GophProfile/pkg/broker"
+	"github.com/SatzhanDev/GophProfile/pkg/metrics"
 	"github.com/SatzhanDev/GophProfile/pkg/postgres"
 	"github.com/SatzhanDev/GophProfile/pkg/s3"
 	"github.com/SatzhanDev/GophProfile/pkg/telemetry"
@@ -120,6 +125,28 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// У worker, в отличие от server, вообще нет своего HTTP-сервера — это
+	// чистый consumer RabbitMQ. Чтобы Prometheus вообще мог его опросить,
+	// поднимаем отдельный, максимально простой HTTP-сервер только с одним
+	// маршрутом "/metrics" на своём порту (MetricsPort, по умолчанию 9100).
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsSrv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", cfg.MetricsPort),
+		Handler:           metricsMux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		slog.Info("starting metrics server", "port", cfg.MetricsPort)
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server stopped unexpectedly", "error", err)
+		}
+	}()
+
+	// Периодически публикуем состояние пула соединений с Postgres —
+	// см. metrics.CollectDBPoolStats. Останавливается сам вместе с ctx.
+	go metrics.CollectDBPoolStats(ctx, dbPool, 15*time.Second)
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -139,6 +166,12 @@ func main() {
 	// доканчивают текущее сообщение и естественным образом выходят из цикла.
 	if err := consumer.Close(); err != nil {
 		slog.Error("failed to close rabbitmq consumer", "error", err)
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
+	if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("failed to shutdown metrics server", "error", err)
 	}
 
 	wg.Wait()

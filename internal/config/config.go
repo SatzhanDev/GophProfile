@@ -89,6 +89,12 @@ type Config struct {
 	RateLimit      RateLimitConfig
 	Telemetry      TelemetryConfig
 	MigrationsPath string
+	// MetricsPort — порт отдельного HTTP-сервера с /metrics для cmd/worker.
+	// У server свой /metrics уже висит на основном порту (см. internal/api/router.go) —
+	// он и так поднимает HTTP-сервер для API. У worker никакого HTTP-сервера
+	// нет вообще (это consumer RabbitMQ), поэтому под один Prometheus-эндпоинт
+	// заводится отдельный, специально для этого лёгкий сервер (см. cmd/worker/main.go).
+	MetricsPort int
 }
 
 // Load читает конфигурацию из переменных окружения.
@@ -121,6 +127,11 @@ func Load() (*Config, error) {
 	}
 
 	rateLimitBurst, err := getEnvInt("RATE_LIMIT_BURST", 10)
+	if err != nil {
+		return nil, err
+	}
+
+	metricsPort, err := getEnvInt("METRICS_PORT", 9100)
 	if err != nil {
 		return nil, err
 	}
@@ -190,6 +201,7 @@ func Load() (*Config, error) {
 			OTLPEndpoint: getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
 		},
 		MigrationsPath: getEnv("MIGRATIONS_PATH", "migrations"),
+		MetricsPort:    metricsPort,
 	}
 
 	return cfg, nil

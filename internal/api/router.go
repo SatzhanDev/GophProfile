@@ -8,9 +8,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/SatzhanDev/GophProfile/internal/config"
 	"github.com/SatzhanDev/GophProfile/internal/handlers"
+	"github.com/SatzhanDev/GophProfile/pkg/metrics"
 )
 
 // Deps — все зависимости, нужные роутеру, чтобы собрать хендлеры.
@@ -45,6 +47,14 @@ func NewRouter(deps Deps) http.Handler {
 
 	r.Get("/health", handlers.NewHealthHandler(deps.HealthChecks).ServeHTTP)
 
+	// /metrics — сюда стучится Prometheus (не человек и не браузер), поэтому
+	// эндпоинт живёт рядом с /health: без рейт-лимита и вне /api/v1.
+	// promhttp.Handler() — готовый обработчик из client_golang: он сам
+	// проходит по всем метрикам, зарегистрированным в prometheus.DefaultRegisterer
+	// (а туда себя регистрирует и pkg/metrics, и стандартные go_*/process_*
+	// метрики рантайма), и отдаёт их в текстовом формате, который Prometheus умеет читать.
+	r.Handle("/metrics", promhttp.Handler())
+
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/web/upload", http.StatusFound)
 	})
@@ -56,6 +66,13 @@ func NewRouter(deps Deps) http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(limiter.Middleware)
+		// RED-метрики снимаем именно здесь, а не глобально на весь роутер —
+		// по той же логике, что и rate limiter парой строк выше: это
+		// публичный REST API для сторонних клиентов (блогов, форумов и
+		// т.п. из идеи продукта), и именно его Rate/Errors/Duration
+		// интересны для дашборда и алертинга. /health, /metrics и /web —
+		// служебные и внутренние маршруты, шуметь ими в тех же метриках незачем.
+		r.Use(metrics.HTTPMiddleware)
 
 		r.Post("/avatars", deps.AvatarHandler.UploadAvatar)
 		r.Get("/avatars/{avatarID}", deps.AvatarHandler.GetAvatar)

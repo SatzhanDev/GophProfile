@@ -4,7 +4,7 @@
 
 ## Стек
 
-Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker, OpenTelemetry + Jaeger.
+Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker, OpenTelemetry + Jaeger, Prometheus.
 
 ## Структура проекта
 
@@ -19,6 +19,7 @@ internal/repository/— доступ к PostgreSQL
 internal/services/  — бизнес-логика
 internal/worker/    — обработчики событий брокера
 pkg/telemetry/  — трейсинг (OpenTelemetry → Jaeger) и корреляция логов
+pkg/metrics/    — Prometheus-метрики (RED, бизнес-, инфраструктурные) и HTTP-middleware
 pkg/            — переиспользуемые пакеты общего назначения
 web/            — веб-интерфейс: HTML-шаблоны, CSS, JS (вшиты в бинарник через go:embed)
 migrations/     — SQL-миграции
@@ -206,6 +207,9 @@ make test-integration
 | RATE_LIMIT_RPS             | 5             | лимит запросов в секунду на один IP (API) |
 | RATE_LIMIT_BURST           | 10            | сколько запросов можно сделать одним всплеском |
 | MIGRATIONS_PATH            | migrations    | путь к папке с SQL-миграциями  |
+| OTEL_SERVICE_NAME          | *(своё для server/worker)* | имя сервиса в Jaeger |
+| OTEL_EXPORTER_OTLP_ENDPOINT| localhost:4317| адрес Jaeger по протоколу OTLP/gRPC |
+| METRICS_PORT               | 9100          | порт отдельного HTTP-сервера с `/metrics` у worker (у server — на SERVER_PORT) |
 
 ## Безопасность
 
@@ -265,6 +269,46 @@ docker compose up -d jaeger   # если работаешь в гибридно�
   `trace_id`/`span_id` в JSON лога. Увидев ошибку в логах — можно по
   `trace_id` открыть в Jaeger весь путь запроса, который к ней привёл.
 
+## Метрики (Prometheus)
+
+```
+docker compose up -d prometheus   # поднимет заодно server и worker, если их ещё нет
+```
+Открой http://localhost:9090 (Prometheus UI) → вкладка Status → Targets — там
+должны быть `gophprofile-server` (server:8080/metrics) и `gophprofile-worker`
+(worker:9100/metrics) в состоянии `UP`. Метрики можно и просто посмотреть
+глазами: `curl localhost:8080/metrics` (сервер) или `curl localhost:9100/metrics` (воркер).
+
+Что собирается (`pkg/metrics/`):
+- **HTTP RED-метрики** (Rate/Errors/Duration) — `gophprofile_http_requests_total`,
+  `gophprofile_http_request_duration_seconds`, `gophprofile_http_requests_in_flight`.
+  Пишутся `metrics.HTTPMiddleware` (`pkg/metrics/http_middleware.go`), подключённым
+  только на группу `/api/v1` в `internal/api/router.go` — по той же логике,
+  что и rate limiter: это трафик от внешних клиентов, именно его Rate/Errors/Duration
+  интересны для дашборда. Метка `route` — это шаблон маршрута
+  (`/api/v1/avatars/{avatarID}`), а не фактический путь с UUID — иначе у каждой
+  аватарки была бы своя метка и метрика "взорвалась" бы по количеству уникальных значений.
+- **Бизнес-метрики** — `gophprofile_avatar_uploads_total`,
+  `gophprofile_avatar_upload_duration_seconds`, `gophprofile_avatar_deletes_total`,
+  `gophprofile_avatar_storage_bytes` (растёт/уменьшается на размер оригинала при
+  загрузке/удалении — оценка приблизительная, миниатюры не учитываются). Пишутся
+  прямо в `internal/services/avatar_service.go`.
+- **Инфраструктурные метрики** — `gophprofile_db_pool_connections` (idle/used/max,
+  снимается раз в 15с из `pgxpool.Stat()` — `metrics.CollectDBPoolStats`, запущен
+  и в `cmd/server`, и в `cmd/worker`), `gophprofile_worker_jobs_total` и
+  `gophprofile_worker_job_duration_seconds` (по очереди upload/delete, пишутся
+  в `internal/worker/runner.go`).
+- У воркера нет своего HTTP-API, поэтому под `/metrics` у него отдельный
+  лёгкий HTTP-сервер на порту `METRICS_PORT` (по умолчанию 9100) —
+  см. `cmd/worker/main.go`.
+
+Пример PromQL-запросов, которые можно вбить в Prometheus UI (Graph):
+```
+rate(gophprofile_http_requests_total{status=~"5.."}[5m])   # ошибки в секунду
+histogram_quantile(0.95, rate(gophprofile_http_request_duration_seconds_bucket[5m]))  # p95 задержки
+gophprofile_avatar_storage_bytes                            # текущий объём хранилища
+```
+
 ## План инкрементов
 
 1. Скелет проекта, конфиг, `/health` — **готово**
@@ -281,7 +325,7 @@ docker compose up -d jaeger   # если работаешь в гибридно�
 ### Спринт 2: наблюдаемость
 
 1. Трейсинг: OpenTelemetry (HTTP, БД, S3, брокер, распространение контекста) + Jaeger, корреляция логов — **готово**
-2. Метрики: Prometheus (RED-метрики, бизнес- и инфраструктурные метрики)
+2. Метрики: Prometheus (RED-метрики, бизнес- и инфраструктурные метрики) — **готово**
 3. Логирование: Grafana Loki + Promtail
 4. Дашборды в Grafana
 5. Бонус: алертинг через Prometheus Alertmanager

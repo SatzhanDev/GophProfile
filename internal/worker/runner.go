@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/SatzhanDev/GophProfile/pkg/broker"
+	"github.com/SatzhanDev/GophProfile/pkg/metrics"
 )
 
 const (
@@ -51,13 +52,18 @@ func RunLoop[T any](ctx context.Context, name string, deliveries <-chan amqp.Del
 		msgCtx := otel.GetTextMapPropagator().Extract(ctx, broker.HeaderCarrier(d.Headers))
 		msgCtx, span := tracer.Start(msgCtx, "worker.handle_"+name, trace.WithSpanKind(trace.SpanKindConsumer))
 
+		jobStart := time.Now()
 		handleErr := runWithRetry(msgCtx, name, handle, event)
+		metrics.WorkerJobDuration.WithLabelValues(name).Observe(time.Since(jobStart).Seconds())
 
 		if handleErr != nil {
+			metrics.WorkerJobsTotal.WithLabelValues(name, "failure").Inc()
 			span.RecordError(handleErr)
 			span.SetStatus(codes.Error, handleErr.Error())
 			slog.ErrorContext(msgCtx, "handler failed after all retries, giving up",
 				"consumer", name, "message_id", d.MessageId, "error", handleErr)
+		} else {
+			metrics.WorkerJobsTotal.WithLabelValues(name, "success").Inc()
 		}
 		span.End()
 
