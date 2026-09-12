@@ -4,7 +4,7 @@
 
 ## Стек
 
-Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker, OpenTelemetry + Jaeger, Prometheus, Grafana + Loki + Promtail.
+Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker, OpenTelemetry + Jaeger, Prometheus + Alertmanager, Grafana + Loki + Promtail.
 
 ## Структура проекта
 
@@ -23,7 +23,7 @@ pkg/metrics/    — Prometheus-метрики (RED, бизнес-, инфрас�
 pkg/            — переиспользуемые пакеты общего назначения
 web/            — веб-интерфейс: HTML-шаблоны, CSS, JS (вшиты в бинарник через go:embed)
 migrations/     — SQL-миграции
-docker/         — Dockerfile (multi-stage сборка server+worker), конфиги Prometheus/Promtail/Grafana
+docker/         — Dockerfile (multi-stage сборка server+worker), конфиги Prometheus/Alertmanager/Promtail/Grafana
 k8s/            — манифесты Kubernetes
 tests/          — интеграционные тесты
 ```
@@ -348,10 +348,83 @@ docker compose up -d loki promtail grafana
   ```
   Это и есть обещанная в трейсинге связка: открыл трейс в Jaeger →
   скопировал `trace_id` → нашёл по нему все логи в Grafana.
-- **Grafana** пока используется только как окно в Loki (Explore) — сама
-  Grafana и её datasource'ы (Prometheus/Loki/Jaeger) провижинятся файлом
+- **Grafana** и её datasource'ы (Prometheus/Loki/Jaeger) провижинятся файлом
   `docker/grafana/provisioning/datasources/datasources.yml` при старте,
-  без единого клика в UI. Полноценные дашборды — предмет следующего инкремента.
+  без единого клика в UI. Готовые дашборды — см. следующий раздел.
+
+## Дашборды (Grafana)
+
+Открой `http://localhost:3000` → папка **GophProfile** в левом меню (Dashboards).
+Три дашборда, провижинятся файлами из `docker/grafana/provisioning/dashboards/`
+(`provider.yml` — конфиг провайдера, остальные `*.json` — сами дашборды; Grafana
+перечитывает эту папку раз в 30 секунд, менять можно без пересоздания контейнера):
+
+- **GophProfile — HTTP (RED)** (`http-red.json`) — Rate/Errors/Duration
+  по `gophprofile_http_*`: запросов в секунду по маршруту, доля 5xx,
+  перцентили p50/p95/p99 задержки, текущее число запросов в обработке.
+- **GophProfile — Ресурсы** (`resources.json`) — CPU и память процессов
+  `server`/`worker` (стандартные метрики Go-рантайма `process_*`, их
+  бесплатно добавляет `promhttp.Handler()` — мы их никак специально не
+  писали), состояние пула соединений с PostgreSQL, открытые файловые дескрипторы.
+- **GophProfile — Бизнес-метрики** (`business.json`) — загрузки и удаления
+  аватарок в секунду по итогу (success/validation_error/storage_error),
+  текущая оценка объёма хранилища, обработка событий воркером
+  (по очереди upload/delete) и её задержка.
+
+Технический момент: в `docker/grafana/provisioning/datasources/datasources.yml`
+у каждого источника данных явно зафиксирован `uid` (`prometheus`/`loki`/`jaeger`).
+Без этого Grafana сгенерировала бы `uid` случайно при первом старте, и ссылки
+`"datasource": {"uid": "prometheus"}` в уже написанных JSON-дашбордах никого
+бы не находили — панели были бы "битыми". Явный `uid` — единственный способ
+сослаться на источник данных из заранее подготовленного файла дашборда.
+
+## Алертинг (Prometheus Alertmanager) — бонус
+
+```
+docker compose up -d alertmanager prometheus
+```
+Открой `http://localhost:9093` (Alertmanager UI) — там видны все активные
+алерты. В Prometheus (`http://localhost:9090` → Alerts) видно то же самое,
+но ещё и с текущим значением условия у каждого правила — удобно для
+отладки, почему алерт ещё не сработал.
+
+Как это устроено: Prometheus (`docker/rules.yml`) каждые 15 секунд
+пересчитывает PromQL-условие каждого правила; если оно остаётся истинным
+дольше `for` — правило переходит в firing и уходит в Alertmanager
+(`docker/prometheus.yml`, секции `rule_files`/`alerting`). Alertmanager
+(`docker/alertmanager.yml`) группирует похожие алерты в одно уведомление,
+не спамит повторно чаще `repeat_interval` и решает, кому это отправить.
+
+Правила (`docker/rules.yml`):
+- `GophProfileServerDown` / `GophProfileWorkerDown` — `up == 0` дольше
+  минуты (сама метрика `up` — служебная, её добавляет Prometheus на
+  каждую цель из `scrape_configs`).
+- `HighHTTPErrorRate` — доля 5xx среди ответов API за 5 минут выше 5%.
+- `HighHTTPLatencyP95` — p95 задержки ответа API выше 1 секунды 5 минут подряд.
+- `DBPoolNearlyExhausted` — больше 80% соединений пула Postgres заняты
+  дольше 5 минут (тут нужен `on(job)` в PromQL — делим две метрики
+  с разными значениями лейбла `state`, поэтому явно указываем, по какому
+  общему лейблу их сопоставлять).
+- `WorkerJobFailures` — воркер продолжает получать ошибки уже после
+  исчерпания retry (см. `internal/worker/runner.go`) — разовый сбой
+  так не поймать, а вот системную проблему с очередью — да.
+
+Получатель уведомлений (`receivers` в `docker/alertmanager.yml`) сейчас
+пустой — без реальной интеграции в Slack/email/Telegram: это учебный
+проект, заводить для него настоящий канал уведомлений незачем. Алерты всё
+равно видны в UI Alertmanager независимо от того, настроен ли получатель —
+этого достаточно, чтобы убедиться, что правила реально работают. В проде
+в `receivers` добавляется `slack_configs`/`email_configs`/`webhook_configs`.
+
+Проверить, что алерт реально стреляет, проще всего на `GophProfileWorkerDown`:
+```
+docker compose stop worker
+```
+подожди больше минуты и обнови `http://localhost:9093` — алерт должен
+появиться в состоянии `firing`. Не забудь вернуть воркер обратно:
+```
+docker compose start worker
+```
 
 ## План инкрементов
 
@@ -371,5 +444,5 @@ docker compose up -d loki promtail grafana
 1. Трейсинг: OpenTelemetry (HTTP, БД, S3, брокер, распространение контекста) + Jaeger, корреляция логов — **готово**
 2. Метрики: Prometheus (RED-метрики, бизнес- и инфраструктурные метрики) — **готово**
 3. Логирование: Grafana Loki + Promtail — **готово**
-4. Дашборды в Grafana
-5. Бонус: алертинг через Prometheus Alertmanager
+4. Дашборды в Grafana — **готово**
+5. Бонус: алертинг через Prometheus Alertmanager — **готово**
