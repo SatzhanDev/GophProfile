@@ -34,6 +34,6 @@ func (h *DeleteHandler) Handle(ctx context.Context, event domain.AvatarDeleteEve
 		}
 	}
 
-	slog.Info("avatar files deleted", "avatar_id", event.AvatarID, "objects", len(event.S3Keys))
+	slog.InfoContext(ctx, "avatar files deleted", "avatar_id", event.AvatarID, "objects", len(event.S3Keys))
 	return nil
 }

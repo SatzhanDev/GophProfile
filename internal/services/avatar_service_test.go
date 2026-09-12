@@ -262,7 +262,7 @@ func TestAvatarService_GetFile(t *testing.T) {
 
 	t.Run("unknown avatar", func(t *testing.T) {
 		_, _, _, err := svc.GetFile(context.Background(), uuid.New(), "")
-		require.ErrorIs(t, err, repository.ErrAvatarNotFound)
+		require.ErrorIs(t, err, ErrAvatarNotFound, "repository errors must be translated to service-level errors")
 	})
 }
 
@@ -284,7 +284,7 @@ func TestAvatarService_Delete(t *testing.T) {
 		svc := NewAvatarService(newFakeRepo(), newFakeStorage(), &fakePublisher{})
 
 		err := svc.Delete(context.Background(), uuid.New(), "user-1")
-		require.ErrorIs(t, err, repository.ErrAvatarNotFound)
+		require.ErrorIs(t, err, ErrAvatarNotFound, "repository errors must be translated to service-level errors")
 	})
 
 	t.Run("success publishes all s3 keys", func(t *testing.T) {

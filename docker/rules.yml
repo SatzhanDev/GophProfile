@@ -1,0 +1,74 @@
+# Правила алертинга Prometheus: у каждого правила есть expr (PromQL-условие,
+# которое либо истинно, либо нет) и for (сколько времени условие должно
+# оставаться истинным непрерывно, прежде чем алерт реально "выстрелит").
+# for нужен, чтобы не дёргать алертами на каждый секундный всплеск —
+# например, кратковременный рестарт контейнера при деплое не должен будить
+# никого ночью, а вот "сервис лежит уже минуту" — уже повод для тревоги.
+groups:
+  - name: gophprofile
+    rules:
+      # up — служебная метрика, которую сам Prometheus добавляет на каждую
+      # цель из scrape_configs: 1, если последний scrape был успешным, 0 —
+      # если цель недоступна (упал процесс, сеть и т.п.).
+      - alert: GophProfileServerDown
+        expr: up{job="gophprofile-server"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GophProfile server недоступен"
+          description: "Prometheus не может собрать метрики с gophprofile-server дольше минуты — сервис, скорее всего, упал или не отвечает."
+
+      - alert: GophProfileWorkerDown
+        expr: up{job="gophprofile-worker"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GophProfile worker недоступен"
+          description: "Prometheus не может собрать метрики с gophprofile-worker дольше минуты — обработка миниатюр и удалений, скорее всего, встала."
+
+      # Доля 5xx среди всех ответов API за последние 5 минут выше 5%.
+      - alert: HighHTTPErrorRate
+        expr: sum(rate(gophprofile_http_requests_total{status=~"5.."}[5m])) / sum(rate(gophprofile_http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокая доля ошибок 5xx в API"
+          description: "Больше 5% запросов к /api/v1 за последние 5 минут завершаются с ошибкой сервера."
+
+      # p95 задержки ответа API выше 1 секунды — для сервиса раздачи
+      # аватарок (в основном простые GET/POST) это уже заметно медленно.
+      - alert: HighHTTPLatencyP95
+        expr: histogram_quantile(0.95, sum(rate(gophprofile_http_request_duration_seconds_bucket[5m])) by (le)) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокая задержка ответа API (p95 > 1с)"
+          description: "95% запросов к API за последние 5 минут обрабатываются дольше секунды."
+
+      # Доля занятых соединений пула Postgres от максимума — если она
+      # регулярно близка к 1, следующий всплеск нагрузки упрётся в лимит
+      # пула и запросы к БД начнут просто ждать своей очереди.
+      - alert: DBPoolNearlyExhausted
+        expr: gophprofile_db_pool_connections{state="used"} / on(job) gophprofile_db_pool_connections{state="max"} > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Пул соединений PostgreSQL почти исчерпан"
+          description: "Больше 80% соединений пула заняты дольше 5 минут — при росте нагрузки запросы к БД начнут упираться в лимит."
+
+      # Воркер стабильно проваливает обработку событий (после исчерпания
+      # всех retry внутри runWithRetry, см. internal/worker/runner.go) —
+      # это не единичный сбой, а систематическая проблема с очередью.
+      - alert: WorkerJobFailures
+        expr: sum(rate(gophprofile_worker_jobs_total{status="failure"}[5m])) by (queue) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Воркер систематически проваливает обработку событий"
+          description: "Очередь {{ $labels.queue }}: воркер продолжает получать ошибки после исчерпания retry — проверь логи и Jaeger."

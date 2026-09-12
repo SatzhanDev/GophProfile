@@ -1,0 +1,19 @@
+# Provisioning дашбордов — тот же принцип, что и с datasources.yml: Grafana
+# при старте сканирует указанный путь (options.path) на JSON-файлы дашбордов
+# и сама их подключает, без единого клика в UI. path совпадает с тем, куда
+# смонтирована эта же папка внутри контейнера (см. docker-compose.yml:
+# "./docker/grafana/provisioning:/etc/grafana/provisioning:ro"), поэтому
+# указываем путь ВНУТРИ контейнера, а не на диске разработчика.
+apiVersion: 1
+
+providers:
+  - name: GophProfile
+    orgId: 1
+    folder: GophProfile
+    type: file
+    disableDeletion: false
+    # updateIntervalSeconds — как часто Grafana перечитывает файлы с диска
+    # и подхватывает изменения без перезапуска контейнера.
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards

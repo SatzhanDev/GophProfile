@@ -4,7 +4,7 @@
 
 ## Стек
 
-Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker.
+Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker, OpenTelemetry + Jaeger, Prometheus + Alertmanager, Grafana + Loki + Promtail.
 
 ## Структура проекта
 
@@ -18,10 +18,12 @@ internal/handlers/  — HTTP-обработчики
 internal/repository/— доступ к PostgreSQL
 internal/services/  — бизнес-логика
 internal/worker/    — обработчики событий брокера
+pkg/telemetry/  — трейсинг (OpenTelemetry → Jaeger) и корреляция логов
+pkg/metrics/    — Prometheus-метрики (RED, бизнес-, инфраструктурные) и HTTP-middleware
 pkg/            — переиспользуемые пакеты общего назначения
 web/            — веб-интерфейс: HTML-шаблоны, CSS, JS (вшиты в бинарник через go:embed)
 migrations/     — SQL-миграции
-docker/         — Dockerfile (multi-stage сборка server+worker)
+docker/         — Dockerfile (multi-stage сборка server+worker), конфиги Prometheus/Alertmanager/Promtail/Grafana
 k8s/            — манифесты Kubernetes
 tests/          — интеграционные тесты
 ```
@@ -192,19 +194,22 @@ make test-integration
 | DB_HOST                    | localhost     | адрес PostgreSQL               |
 | DB_PORT                    | 5434          | порт PostgreSQL (не 5432/5433 — чтобы не конфликтовать с уже запущенными локальными Postgres) |
 | DB_USER                    | gophprofile   | пользователь PostgreSQL        |
-| DB_PASSWORD                | gophprofile   | пароль PostgreSQL              |
+| DB_PASSWORD                | *(обязателен, дефолта нет)* | пароль PostgreSQL |
 | DB_NAME                    | gophprofile   | имя базы данных                |
 | DB_SSLMODE                 | disable       | режим SSL для подключения      |
 | S3_ENDPOINT                | localhost:9000| адрес S3-совместимого хранилища (без схемы http/https) |
-| S3_ACCESS_KEY              | minioadmin    | access key                     |
-| S3_SECRET_KEY              | minioadmin    | secret key                     |
+| S3_ACCESS_KEY              | *(обязателен, дефолта нет)* | access key       |
+| S3_SECRET_KEY              | *(обязателен, дефолта нет)* | secret key       |
 | S3_BUCKET                  | avatars       | бакет, где хранятся файлы аватарок |
 | S3_USE_SSL                 | false         | использовать ли HTTPS до хранилища |
-| RABBITMQ_URL               | amqp://guest:guest@localhost:5673/ | адрес RabbitMQ (AMQP) |
+| RABBITMQ_URL               | *(обязателен, дефолта нет)* | адрес RabbitMQ (AMQP) |
 | CORS_ALLOWED_ORIGINS       | *             | разрешённые origin'ы через запятую |
 | RATE_LIMIT_RPS             | 5             | лимит запросов в секунду на один IP (API) |
 | RATE_LIMIT_BURST           | 10            | сколько запросов можно сделать одним всплеском |
 | MIGRATIONS_PATH            | migrations    | путь к папке с SQL-миграциями  |
+| OTEL_SERVICE_NAME          | *(своё для server/worker)* | имя сервиса в Jaeger |
+| OTEL_EXPORTER_OTLP_ENDPOINT| localhost:4317| адрес Jaeger по протоколу OTLP/gRPC |
+| METRICS_PORT               | 9100          | порт отдельного HTTP-сервера с `/metrics` у worker (у server — на SERVER_PORT) |
 
 ## Безопасность
 
@@ -224,8 +229,202 @@ make test-integration
   Реализовано вручную на `golang.org/x/time/rate`, без сторонних
   rate-limiting-библиотек — так виден сам алгоритм, а не только вызов
   готовой функции.
+- **Никаких дефолтов для чувствительных параметров.** `DB_PASSWORD`,
+  `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `RABBITMQ_URL` не имеют значений по
+  умолчанию в коде — раньше там были общеизвестные дефолты вроде
+  `minioadmin`/`guest:guest`, и если забыть задать их явно при деплое,
+  сервис незаметно стартовал бы с небезопасными реквизитами. Теперь
+  вместо этого `config.Load()` возвращает ошибку сразу при старте
+  (fail fast), если хоть один из них не задан. Для локальной разработки
+  ничего не меняется — значения по-прежнему берутся из `.env`.
 - **CORS** (`github.com/go-chi/cors`) — список разрешённых origin'ов
   настраивается через `CORS_ALLOWED_ORIGINS`, по умолчанию `*` (разработка).
+
+## Трейсинг (OpenTelemetry → Jaeger)
+
+```
+docker compose up -d jaeger   # если работаешь в гибридном режиме
+```
+Открой http://localhost:16686 (Jaeger UI), выбери сервис `gophprofile-server`
+или `gophprofile-worker` и посмотри трейсы.
+
+Что покрыто (`pkg/telemetry/`):
+- **HTTP** — весь роутер обёрнут в `otelhttp.NewHandler` (`cmd/server/main.go`):
+  span на каждый запрос, с извлечением `traceparent` из входящих заголовков.
+- **PostgreSQL** — `telemetry.PgxTracer` подключается к пулу один раз
+  в `pkg/postgres.NewPool` и автоматически оборачивает в span **каждый**
+  SQL-запрос — ни один метод репозитория трогать не пришлось.
+- **S3** — ручные спаны вокруг `Upload`/`Download`/`Delete` в `pkg/s3`.
+- **RabbitMQ + распространение контекста между процессами** — при публикации
+  (`pkg/broker.Publisher.Publish`) контекст трейсинга внедряется прямо
+  в заголовки AMQP-сообщения; воркер (`internal/worker.RunLoop`) достаёт его
+  оттуда и продолжает **тот же трейс**. Поэтому путь "HTTP-запрос → публикация
+  события → обработка в отдельном процессе-воркере" виден в Jaeger одной
+  цепочкой, хотя это два независимых процесса.
+- **Бизнес-логика** — `AvatarService.Upload` оборачивается в span
+  `upload_avatar` с атрибутами `user_id`/`file_name`/`file_size`/`avatar_id`
+  (пример ровно по ТЗ).
+- **Корреляция логов с трейсами** — `telemetry.TraceHandler` оборачивает
+  `slog`-хендлер и на каждый вызов `slog.*Context(ctx, ...)` добавляет
+  `trace_id`/`span_id` в JSON лога. Увидев ошибку в логах — можно по
+  `trace_id` открыть в Jaeger весь путь запроса, который к ней привёл.
+
+## Метрики (Prometheus)
+
+```
+docker compose up -d prometheus   # поднимет заодно server и worker, если их ещё нет
+```
+Открой http://localhost:9090 (Prometheus UI) → вкладка Status → Targets — там
+должны быть `gophprofile-server` (server:8080/metrics) и `gophprofile-worker`
+(worker:9100/metrics) в состоянии `UP`. Метрики можно и просто посмотреть
+глазами: `curl localhost:8080/metrics` (сервер) или `curl localhost:9100/metrics` (воркер).
+
+Что собирается (`pkg/metrics/`):
+- **HTTP RED-метрики** (Rate/Errors/Duration) — `gophprofile_http_requests_total`,
+  `gophprofile_http_request_duration_seconds`, `gophprofile_http_requests_in_flight`.
+  Пишутся `metrics.HTTPMiddleware` (`pkg/metrics/http_middleware.go`), подключённым
+  только на группу `/api/v1` в `internal/api/router.go` — по той же логике,
+  что и rate limiter: это трафик от внешних клиентов, именно его Rate/Errors/Duration
+  интересны для дашборда. Метка `route` — это шаблон маршрута
+  (`/api/v1/avatars/{avatarID}`), а не фактический путь с UUID — иначе у каждой
+  аватарки была бы своя метка и метрика "взорвалась" бы по количеству уникальных значений.
+- **Бизнес-метрики** — `gophprofile_avatar_uploads_total`,
+  `gophprofile_avatar_upload_duration_seconds`, `gophprofile_avatar_deletes_total`,
+  `gophprofile_avatar_storage_bytes` (растёт/уменьшается на размер оригинала при
+  загрузке/удалении — оценка приблизительная, миниатюры не учитываются). Пишутся
+  прямо в `internal/services/avatar_service.go`.
+- **Инфраструктурные метрики** — `gophprofile_db_pool_connections` (idle/used/max,
+  снимается раз в 15с из `pgxpool.Stat()` — `metrics.CollectDBPoolStats`, запущен
+  и в `cmd/server`, и в `cmd/worker`), `gophprofile_worker_jobs_total` и
+  `gophprofile_worker_job_duration_seconds` (по очереди upload/delete, пишутся
+  в `internal/worker/runner.go`).
+- У воркера нет своего HTTP-API, поэтому под `/metrics` у него отдельный
+  лёгкий HTTP-сервер на порту `METRICS_PORT` (по умолчанию 9100) —
+  см. `cmd/worker/main.go`.
+
+Пример PromQL-запросов, которые можно вбить в Prometheus UI (Graph):
+```
+rate(gophprofile_http_requests_total{status=~"5.."}[5m])   # ошибки в секунду
+histogram_quantile(0.95, rate(gophprofile_http_request_duration_seconds_bucket[5m]))  # p95 задержки
+gophprofile_avatar_storage_bytes                            # текущий объём хранилища
+```
+
+## Логирование (Grafana Loki + Promtail)
+
+```
+docker compose up -d loki promtail grafana
+```
+Открой http://localhost:3000 (Grafana, анонимный вход с правами Admin — см.
+`GF_AUTH_ANONYMOUS_*` в docker-compose.yml) → Explore → источник данных Loki →
+запрос `{service="server"}` — увидишь JSON-логи сервера в реальном времени.
+
+Как это устроено — в отличие от трейсинга и метрик, здесь **не понадобилось
+менять ни строчки Go-кода**: структурные JSON-логи с `trace_id`/`span_id`
+уже писались в stdout с самого первого инкремента наблюдаемости
+(`pkg/telemetry/logging.go`), а Docker сам сохраняет stdout любого контейнера
+в файл на диске. Дальше — чисто инфраструктурная часть:
+
+- **Promtail** (`docker/promtail.yml`) через Docker API (`docker_sd_configs`)
+  узнаёт, какие контейнеры вообще запущены, находит их лог-файлы на диске
+  (`/var/lib/docker/containers/<id>/*-json.log`) и построчно отправляет
+  их в Loki. Лейблы `container`/`service` берутся из имени и
+  compose-лейблов контейнера (`service` — это имя сервиса из
+  docker-compose.yml: `server`, `worker`, `postgres` и т.д., а не OTEL-имя
+  из Jaeger) — это то, по чему потом фильтруют в Grafana (`{service="worker"}`).
+- Стадия пайплайна `docker: {}` снимает "конверт" самого Docker
+  (`{"log": "...", "stream": "stdout", "time": "..."}`), а следующая
+  `json:` уже разбирает наш собственный JSON от `slog` и достаёт из него
+  `level` — он превращается в лейбл Loki (`| level="error"`), у него всего
+  4 возможных значения, это дёшево.
+- **`trace_id` лейблом не становится** — сознательно. Лейблы в Loki
+  устроены так же, как в Prometheus: каждое новое значение заводит
+  отдельный "стрим" на диске, а `trace_id` уникален на каждый запрос —
+  сделай его лейблом, и получится ровно тот cardinality explosion, который
+  уже разбирали для Prometheus и UUID в путях (`pkg/metrics/http_middleware.go`).
+  Найти логи конкретного трейса всё равно можно — просто фильтром на
+  момент запроса, а не заранее проиндексированным лейблом:
+  ```
+  {service="server"} | json | trace_id="<id из Jaeger>"
+  ```
+  Это и есть обещанная в трейсинге связка: открыл трейс в Jaeger →
+  скопировал `trace_id` → нашёл по нему все логи в Grafana.
+- **Grafana** и её datasource'ы (Prometheus/Loki/Jaeger) провижинятся файлом
+  `docker/grafana/provisioning/datasources/datasources.yml` при старте,
+  без единого клика в UI. Готовые дашборды — см. следующий раздел.
+
+## Дашборды (Grafana)
+
+Открой `http://localhost:3000` → папка **GophProfile** в левом меню (Dashboards).
+Три дашборда, провижинятся файлами из `docker/grafana/provisioning/dashboards/`
+(`provider.yml` — конфиг провайдера, остальные `*.json` — сами дашборды; Grafana
+перечитывает эту папку раз в 30 секунд, менять можно без пересоздания контейнера):
+
+- **GophProfile — HTTP (RED)** (`http-red.json`) — Rate/Errors/Duration
+  по `gophprofile_http_*`: запросов в секунду по маршруту, доля 5xx,
+  перцентили p50/p95/p99 задержки, текущее число запросов в обработке.
+- **GophProfile — Ресурсы** (`resources.json`) — CPU и память процессов
+  `server`/`worker` (стандартные метрики Go-рантайма `process_*`, их
+  бесплатно добавляет `promhttp.Handler()` — мы их никак специально не
+  писали), состояние пула соединений с PostgreSQL, открытые файловые дескрипторы.
+- **GophProfile — Бизнес-метрики** (`business.json`) — загрузки и удаления
+  аватарок в секунду по итогу (success/validation_error/storage_error),
+  текущая оценка объёма хранилища, обработка событий воркером
+  (по очереди upload/delete) и её задержка.
+
+Технический момент: в `docker/grafana/provisioning/datasources/datasources.yml`
+у каждого источника данных явно зафиксирован `uid` (`prometheus`/`loki`/`jaeger`).
+Без этого Grafana сгенерировала бы `uid` случайно при первом старте, и ссылки
+`"datasource": {"uid": "prometheus"}` в уже написанных JSON-дашбордах никого
+бы не находили — панели были бы "битыми". Явный `uid` — единственный способ
+сослаться на источник данных из заранее подготовленного файла дашборда.
+
+## Алертинг (Prometheus Alertmanager) — бонус
+
+```
+docker compose up -d alertmanager prometheus
+```
+Открой `http://localhost:9093` (Alertmanager UI) — там видны все активные
+алерты. В Prometheus (`http://localhost:9090` → Alerts) видно то же самое,
+но ещё и с текущим значением условия у каждого правила — удобно для
+отладки, почему алерт ещё не сработал.
+
+Как это устроено: Prometheus (`docker/rules.yml`) каждые 15 секунд
+пересчитывает PromQL-условие каждого правила; если оно остаётся истинным
+дольше `for` — правило переходит в firing и уходит в Alertmanager
+(`docker/prometheus.yml`, секции `rule_files`/`alerting`). Alertmanager
+(`docker/alertmanager.yml`) группирует похожие алерты в одно уведомление,
+не спамит повторно чаще `repeat_interval` и решает, кому это отправить.
+
+Правила (`docker/rules.yml`):
+- `GophProfileServerDown` / `GophProfileWorkerDown` — `up == 0` дольше
+  минуты (сама метрика `up` — служебная, её добавляет Prometheus на
+  каждую цель из `scrape_configs`).
+- `HighHTTPErrorRate` — доля 5xx среди ответов API за 5 минут выше 5%.
+- `HighHTTPLatencyP95` — p95 задержки ответа API выше 1 секунды 5 минут подряд.
+- `DBPoolNearlyExhausted` — больше 80% соединений пула Postgres заняты
+  дольше 5 минут (тут нужен `on(job)` в PromQL — делим две метрики
+  с разными значениями лейбла `state`, поэтому явно указываем, по какому
+  общему лейблу их сопоставлять).
+- `WorkerJobFailures` — воркер продолжает получать ошибки уже после
+  исчерпания retry (см. `internal/worker/runner.go`) — разовый сбой
+  так не поймать, а вот системную проблему с очередью — да.
+
+Получатель уведомлений (`receivers` в `docker/alertmanager.yml`) сейчас
+пустой — без реальной интеграции в Slack/email/Telegram: это учебный
+проект, заводить для него настоящий канал уведомлений незачем. Алерты всё
+равно видны в UI Alertmanager независимо от того, настроен ли получатель —
+этого достаточно, чтобы убедиться, что правила реально работают. В проде
+в `receivers` добавляется `slack_configs`/`email_configs`/`webhook_configs`.
+
+Проверить, что алерт реально стреляет, проще всего на `GophProfileWorkerDown`:
+```
+docker compose stop worker
+```
+подожди больше минуты и обнови `http://localhost:9093` — алерт должен
+появиться в состоянии `firing`. Не забудь вернуть воркер обратно:
+```
+docker compose start worker
+```
 
 ## План инкрементов
 
@@ -239,3 +438,11 @@ make test-integration
 8. Юнит-тесты, golangci-lint — **готово**
 9. Docker / docker-compose — **готово**
 10. Бонус: безопасность (magic bytes, rate limiting, CORS) — **готово**
+
+### Спринт 2: наблюдаемость
+
+1. Трейсинг: OpenTelemetry (HTTP, БД, S3, брокер, распространение контекста) + Jaeger, корреляция логов — **готово**
+2. Метрики: Prometheus (RED-метрики, бизнес- и инфраструктурные метрики) — **готово**
+3. Логирование: Grafana Loki + Promtail — **готово**
+4. Дашборды в Grafana — **готово**
+5. Бонус: алертинг через Prometheus Alertmanager — **готово**
