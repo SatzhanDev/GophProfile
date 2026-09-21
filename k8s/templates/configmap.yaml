@@ -1,0 +1,30 @@
+{{/*
+Все переменные ниже — открытая информация (лимиты, адреса сервисов,
+режимы работы), поэтому ConfigMap, а не Secret: ConfigMap видно в
+`kubectl get configmap -o yaml` открытым текстом, и это нормально —
+секретами здесь и не пахнет. Ключи один в один совпадают с именами ENV,
+которые читает internal/config.Load() (см. internal/config/config.go).
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-config
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+data:
+  APP_ENV: {{ .Values.config.appEnv | quote }}
+  SERVER_HOST: "0.0.0.0"
+  SERVER_PORT: {{ .Values.server.port | quote }}
+  DB_HOST: {{ .Values.config.dbHost | quote }}
+  DB_PORT: {{ .Values.config.dbPort | quote }}
+  DB_NAME: {{ .Values.config.dbName | quote }}
+  DB_SSLMODE: {{ .Values.config.dbSSLMode | quote }}
+  S3_ENDPOINT: {{ .Values.config.s3Endpoint | quote }}
+  S3_BUCKET: {{ .Values.config.s3Bucket | quote }}
+  S3_USE_SSL: {{ .Values.config.s3UseSSL | quote }}
+  CORS_ALLOWED_ORIGINS: {{ .Values.config.corsAllowedOrigins | quote }}
+  RATE_LIMIT_RPS: {{ .Values.config.rateLimitRPS | quote }}
+  RATE_LIMIT_BURST: {{ .Values.config.rateLimitBurst | quote }}
+  MIGRATIONS_PATH: {{ .Values.config.migrationsPath | quote }}
+  METRICS_PORT: {{ .Values.worker.metricsPort | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.otelExporterEndpoint | quote }}

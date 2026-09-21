@@ -1,0 +1,38 @@
+{{- if .Values.worker.autoscaling.enabled }}
+# Масштабирование по CPU/памяти, как и требует ТЗ. Честно говоря, для
+# воркера правильнее было бы масштабироваться по глубине очереди RabbitMQ
+# (чем больше необработанных сообщений — тем больше реплик нужно, а не
+# наоборот: воркер может простаивать с низким CPU, просто потому что
+# сообщений пока нет, и по CPU-метрике HPA решит его наоборот сократить).
+# Для этого в проде используют KEDA (умеет скейлить по длине очереди
+# RabbitMQ/Kafka/да чему угодно через ScaledObject) — но это отдельный
+# оператор, которого нет "из коробки" ни в одном кластере, а CPU/RAM HPA
+# входит в Kubernetes всегда. Ограничиваемся тем, что просит ТЗ.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-worker
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "gophprofile.fullname" . }}-worker
+  minReplicas: {{ .Values.worker.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.worker.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.worker.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.worker.autoscaling.targetMemoryUtilizationPercentage }}
+{{- end }}

@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-worker
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  {{- if not .Values.worker.autoscaling.enabled }}
+  replicas: {{ .Values.worker.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "gophprofile.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "gophprofile.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      annotations:
+        # См. подробный комментарий в deployment-server.yaml: без этих
+        # аннотаций поды не перезапускаются сами при изменении
+        # ConfigMap/Secret — именно это и произошло при первом деплое
+        # этого чарта (см. README/историю про host.docker.internal и
+        # DB_PORT), пришлось руками звать `kubectl rollout restart`.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "gophprofile.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["./worker"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            # У worker нет HTTP API — единственный порт, который у него
+            # вообще есть, это /metrics для Prometheus (см.
+            # cmd/worker/main.go: отдельный http.Server на METRICS_PORT,
+            # потому что сам воркер — это consumer RabbitMQ, а не веб-сервер).
+            - name: metrics
+              containerPort: {{ .Values.worker.metricsPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "gophprofile.fullname" . }}-config
+            - secretRef:
+                name: {{ include "gophprofile.fullname" . }}-secrets
+          # У воркера нет своего /health — используем /metrics как пробу:
+          # если этот HTTP-сервер отвечает, процесс минимально жив (тот же
+          # процесс держит и consumer-луп RabbitMQ). Это не идеальная проверка
+          # ("сервер метрик жив" ≠ "луп чтения очереди жив"), но она честная —
+          # ничего более точного без отдельного health-эндпоинта у воркера не получить.
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

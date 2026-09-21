@@ -1,0 +1,110 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-server
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gophprofile.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  # Как только у Pod'а появляется хотя бы одна NetworkPolicy с этим типом —
+  # весь трафик в этом направлении, который явно не разрешён ниже, начинает
+  # блокироваться (Kubernetes по умолчанию "deny all", если есть хоть одна
+  # применимая политика). До этого файла трафик вообще ничем не ограничивался.
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Реальные запросы пользователей API/веб-интерфейса идут через
+    # Ingress-контроллер — разрешаем трафик только из его неймспейса.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.server.port }}
+    # Скрейп /metrics Prometheus'ом — тот же порт, что и API, у server
+    # один порт на всё (см. internal/api/router.go).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.server.port }}
+  egress:
+    # DNS. Без этого правила резолвинг имён (postgres, rabbitmq, minio,
+    # любых Service-имён) перестанет работать вообще: egress "по умолчанию
+    # запрещено" касается ЛЮБОГО исходящего трафика, включая DNS-запросы —
+    # это очень частая ошибка при первом знакомстве с NetworkPolicy
+    # ("приложение не может достучаться вообще ни до чего после того, как
+    # применили политику" — а на самом деле сломался просто DNS).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Инфраструктурные зависимости (PostgreSQL/RabbitMQ/MinIO/Jaeger) этот
+    # чарт не деплоит и не знает точно, в каком неймспейсе/поде они живут
+    # (см. комментарий про config.dbHost в values.yaml) — поэтому egress
+    # разрешаем КУДА УГОДНО, но только на конкретные порты, которые реально
+    # нужны приложению. Это всё ещё осмысленное ограничение: даже если
+    # контейнер скомпрометируют, он не сможет открыть произвольное исходящее
+    # соединение (например, наружу на 443, чтобы вывести данные) — только
+    # на эти четыре порта.
+    - ports:
+        {{- range .Values.networkPolicy.dependencyPorts }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-worker
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gophprofile.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # У worker нет HTTP API для внешних клиентов вообще — единственный
+    # легитимный входящий трафик это скрейп /metrics Prometheus'ом.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.worker.metricsPort }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        {{- range .Values.networkPolicy.dependencyPorts }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+{{- end }}

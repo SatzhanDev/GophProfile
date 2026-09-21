@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-server
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "gophprofile.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+  ports:
+    # Один и тот же порт 8080 у сервера обслуживает и API/веб-интерфейс,
+    # и /metrics (см. internal/api/router.go) — поэтому один именованный
+    # порт "http" на всё, отдельного порта для метрик у server, в отличие
+    # от worker, нет и не нужно.
+    - name: http
+      port: 80
+      targetPort: http

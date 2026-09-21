@@ -4,13 +4,14 @@
 
 ## Стек
 
-Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker, OpenTelemetry + Jaeger, Prometheus + Alertmanager, Grafana + Loki + Promtail.
+Go, Chi, PostgreSQL, MinIO (S3), RabbitMQ, Docker, OpenTelemetry + Jaeger, Prometheus + Alertmanager, Grafana + Loki + Promtail, Kubernetes + Helm.
 
 ## Структура проекта
 
 ```
 cmd/server/     — точка входа HTTP-сервера
 cmd/worker/     — точка входа воркера асинхронной обработки
+cmd/migrate/    — точка входа для разового применения миграций (Helm-хук)
 internal/api/   — сборка роутера и middleware
 internal/config/— загрузка конфигурации из env
 internal/domain/    — доменные модели
@@ -23,10 +24,80 @@ pkg/metrics/    — Prometheus-метрики (RED, бизнес-, инфрас�
 pkg/            — переиспользуемые пакеты общего назначения
 web/            — веб-интерфейс: HTML-шаблоны, CSS, JS (вшиты в бинарник через go:embed)
 migrations/     — SQL-миграции
-docker/         — Dockerfile (multi-stage сборка server+worker), конфиги Prometheus/Alertmanager/Promtail/Grafana
-k8s/            — манифесты Kubernetes
+docker/         — Dockerfile (multi-stage сборка server+worker+migrate), конфиги Prometheus/Alertmanager/Promtail/Grafana
+k8s/            — Helm-чарт (Chart.yaml, values*.yaml, templates/) для деплоя в Kubernetes
 tests/          — интеграционные тесты
+openapi.yaml    — спецификация REST API (OpenAPI 3.0)
 ```
+
+## Архитектура
+
+```mermaid
+graph TD
+    User["Внешний клиент<br/>браузер / сторонняя платформа"]
+
+    subgraph K8S["Kubernetes-кластер (Helm-релиз gophprofile)"]
+        Ingress["Ingress (nginx)"]
+        SvcServer["Service: server"]
+        SvcWorker["Service: worker<br/>(:9100/metrics)"]
+        DeployServer["Deployment: server<br/>HPA 2..10 реплик"]
+        DeployWorker["Deployment: worker<br/>HPA 1..5 реплик"]
+        CM["ConfigMap"]
+        Secret["Secret"]
+        SM["ServiceMonitor"]
+        Job["Job: migrate<br/>(pre-upgrade hook)"]
+    end
+
+    subgraph DATA["Данные и очередь (внешние зависимости чарта)"]
+        PG[("PostgreSQL")]
+        S3[("MinIO / S3")]
+        MQ{{"RabbitMQ"}}
+    end
+
+    subgraph OBS["Observability"]
+        Jaeger["Jaeger"]
+        Prom["Prometheus"]
+        AM["Alertmanager"]
+        Loki["Loki"]
+        Promtail["Promtail"]
+        Grafana["Grafana"]
+    end
+
+    User --> Ingress --> SvcServer --> DeployServer
+    SvcWorker --> DeployWorker
+    SM -. "scrape /metrics" .-> SvcServer
+    SM -. "scrape /metrics" .-> SvcWorker
+
+    CM --> DeployServer
+    CM --> DeployWorker
+    Secret --> DeployServer
+    Secret --> DeployWorker
+    Job -. "миграции перед раскаткой" .-> PG
+
+    DeployServer --> PG
+    DeployServer --> S3
+    DeployServer -- "publish avatar.uploaded/deleted" --> MQ
+    MQ -- "consume" --> DeployWorker
+    DeployWorker --> PG
+    DeployWorker --> S3
+
+    DeployServer -. "OTLP" .-> Jaeger
+    DeployWorker -. "OTLP" .-> Jaeger
+    Prom --> SM
+    Prom --> AM
+    DeployServer -. "stdout logs" .-> Promtail
+    DeployWorker -. "stdout logs" .-> Promtail
+    Promtail --> Loki
+    Grafana --> Prom
+    Grafana --> Loki
+    Grafana --> Jaeger
+```
+
+`PostgreSQL`/`MinIO`/`RabbitMQ` показаны вне блока Kubernetes-кластера
+намеренно: Helm-чарт в `k8s/` разворачивает только само приложение
+GophProfile (server + worker и всё вокруг них), а не полный стек
+зависимостей — см. подробное объяснение в `k8s/values.yaml`
+(комментарий у секции `config`) и раздел «В Kubernetes через Helm» ниже.
 
 ## Запуск
 
@@ -47,6 +118,10 @@ docker compose up --build
 переменные окружения (адреса `postgres`/`minio`/`rabbitmq` — это имена
 сервисов, не `localhost`: внутри docker-сети контейнеры видят друг друга
 по имени, а не по портам, проброшенным наружу на твой Мак).
+
+Прогнать миграции отдельно, не поднимая сервер целиком (тот же бинарник,
+которым в Kubernetes управляет Helm-хук — см. `cmd/migrate` и раздел
+про Kubernetes ниже): `docker compose --profile jobs run --rm migrate`.
 
 Собрать без запуска: `docker compose build`. Пересобрать после правок в
 коде: `docker compose up --build`. Посмотреть логи одного сервиса:
@@ -89,7 +164,96 @@ go run ./cmd/worker
 RabbitMQ — http://localhost:15673 (`guest`/`guest`, вкладка Exchanges покажет
 `avatars.exchange`).
 
+### В Kubernetes через Helm (Rancher Desktop)
+
+Чарт лежит в `k8s/` и деплоит только само приложение (server + worker) —
+PostgreSQL/MinIO/RabbitMQ он не поднимает (см. «Архитектура» выше). Проще
+всего для локальной проверки — оставить их в docker-compose и подружить
+сеть Rancher Desktop с сетью docker-compose, либо поднять их же вручную
+внутри кластера. Дальше — сам деплой приложения:
+
+```
+# 1. Собрать образ в тот же Docker-демон, которым пользуется Rancher Desktop
+docker build -t gophprofile:local -f docker/Dockerfile .
+
+# 2. Проверить чарт локально, без применения к кластеру
+make helm-lint
+make helm-template     # посмотреть, что реально сгенерируется
+
+# 3. Установить релиз с дев-оверрайдами (k8s/values-dev.yaml)
+helm install gophprofile ./k8s -f k8s/values-dev.yaml \
+  --set config.dbHost=host.docker.internal \
+  --set config.s3Endpoint=host.docker.internal:9000 \
+  --set secrets.rabbitmqURL="amqp://guest:guest@host.docker.internal:5673/"
+```
+
+`host.docker.internal` — то, как контейнеры внутри Rancher Desktop обычно
+достают до сервисов, поднятых на хосте через docker-compose (порты 5434/9000/5673
+из `.env.example`, а не 5432/9000/5672 внутренние — то же самое различие,
+что и в гибридном режиме запуска выше). Если вместо этого поднимаешь
+Postgres/MinIO/RabbitMQ прямо в кластере — подставь их реальные Service-адреса.
+
+Дальше — как с любым Helm-релизом:
+
+```
+kubectl get pods                       # server/worker должны стать Running
+kubectl logs -l app.kubernetes.io/component=worker -f
+helm upgrade gophprofile ./k8s -f k8s/values-dev.yaml   # применить изменения (включая Job миграций)
+helm uninstall gophprofile             # снести релиз целиком
+```
+
+Для доступа через Ingress — добавь запись в `/etc/hosts`
+(`127.0.0.1 gophprofile.local`) и открой `http://gophprofile.local/web/upload`;
+без Ingress — `kubectl port-forward svc/gophprofile-server 8080:80`.
+
+Что внутри чарта (подробные комментарии — прямо в файлах `k8s/templates/`):
+- **Deployment + Service + Ingress + ConfigMap + Secret** — базовые ресурсы
+  приложения. `Secret` создаётся через `stringData` (Kubernetes сам считает
+  base64), либо `secrets.create: false`, если секрет заводится снаружи
+  (CI/CD, Vault, Sealed Secrets) — см. `k8s/values-prod.yaml`.
+- **HorizontalPodAutoscaler** — по CPU/RAM отдельно для server и worker
+  (`k8s/templates/hpa-*.yaml`); требует `metrics-server` в кластере и
+  заданные `resources.requests` у контейнера — без этого HPA просто не считает утилизацию.
+- **ServiceMonitor** (`k8s/templates/servicemonitor.yaml`) — выключен по
+  умолчанию (`serviceMonitor.enabled: false`): это CRD от Prometheus
+  Operator, которого нет в ванильном кластере. Включай только если в
+  кластере уже стоит kube-prometheus-stack или аналог.
+- **NetworkPolicy** — по умолчанию включена в проде, выключена в
+  `values-dev.yaml` (на локальном кластере обычно нет ни
+  `ingress-nginx`, ни `monitoring` неймспейсов с нужными лейблами —
+  включённая политика просто заблокирует весь трафик наглухо).
+- **ServiceAccount без токена** (`automountServiceAccountToken: false`) +
+  **SecurityContext** (non-root UID 65532, `readOnlyRootFilesystem`,
+  `drop: ["ALL"]` капабилити) — приложению ни разу не нужен доступ к
+  Kubernetes API, поэтому токен ему просто не выдаётся.
+- **Job миграций** (`k8s/templates/job-migrate.yaml`) — Helm
+  `pre-upgrade`-хук, гоняет отдельный бинарник `cmd/migrate`. Сознательно
+  не `pre-install` — на первой установке ConfigMap/Secret ещё не
+  существуют (Helm создаёт хуки до обычных ресурсов чарта), а
+  `server`/`worker` и так безопасно накатывают миграции сами при первом
+  старте.
+- **Graceful shutdown** — `server`/`worker` уже умели корректно
+  останавливаться сами (`signal.NotifyContext` + `srv.Shutdown` с таймаутом,
+  см. `cmd/server/main.go`), но в Kubernetes к этому добавляются ещё два
+  элемента. `terminationGracePeriodSeconds` (30с у server, 45с у worker —
+  ему нужно чуть больше, чтобы дошить текущую генерацию миниатюр, а не
+  оборвать её на середине) — сколько всего времени Kubernetes ждёт перед
+  тем, как убить процесс принудительно (SIGKILL) после SIGTERM.
+  `preStop`-хук у server (`sleep 5`) решает отдельную гонку: kubelet
+  посылает SIGTERM и одновременно начинает убирать под из Endpoints
+  Service'а, но эти два события не синхронизированы — часть кластера
+  может продолжать слать трафик на под ещё секунду-другую после SIGTERM,
+  пока обновление не разошлось по всем `kube-proxy`. У worker такого
+  хука нет — на него не льётся живой пользовательский трафик через
+  Service (только периодический скрейп метрик), терять который не жалко.
+
 ## API аватарок
+
+Полная и актуальная спецификация — в `openapi.yaml` (OpenAPI 3.0, корень
+репозитория). Посмотреть её как интерактивную страницу, не поднимая
+ничего своего: открой https://editor.swagger.io и вставь содержимое
+файла, либо `npx @redocly/cli preview-docs openapi.yaml` локально. Ниже —
+только самые ходовые запросы для быстрой проверки руками.
 
 ```
 # Загрузить аватарку
@@ -446,3 +610,12 @@ docker compose start worker
 3. Логирование: Grafana Loki + Promtail — **готово**
 4. Дашборды в Grafana — **готово**
 5. Бонус: алертинг через Prometheus Alertmanager — **готово**
+
+### Спринт 3: Kubernetes и Helm
+
+1. Базовые манифесты: Deployment, Service, Ingress, ConfigMap, Secret — **готово**
+2. Масштабируемость: HPA по CPU/RAM, liveness/readiness-пробы — **готово**
+3. Мониторинг в кластере: ServiceMonitor для Prometheus Operator — **готово**
+4. Безопасность: NetworkPolicy, ServiceAccount без токена, SecurityContext (non-root, read-only rootfs) — **готово**
+5. Упаковка в Helm Chart: values для окружений, хук миграций БД (`cmd/migrate`) — **готово**
+6. Продакшен: graceful shutdown в Kubernetes (preStop, terminationGracePeriodSeconds), актуальный OpenAPI, диаграмма архитектуры — **готово**

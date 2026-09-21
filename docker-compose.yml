@@ -148,6 +148,23 @@ services:
       jaeger:
         condition: service_started
 
+  migrate:
+    # Тот же бинарник, которым в Kubernetes управляет Helm pre-upgrade hook
+    # (k8s/templates/job-migrate.yaml) — здесь просто способ прогнать его
+    # руками локально, не поднимая ради этого весь server. profiles: ["jobs"]
+    # значит, что обычный `docker compose up` эту службу не тронет —
+    # запускается только явно: `docker compose --profile jobs run --rm migrate`.
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["./migrate"]
+    environment:
+      <<: *app-env
+    profiles: ["jobs"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   prometheus:
     image: prom/prometheus:v2.55.1
     restart: unless-stopped

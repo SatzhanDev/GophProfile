@@ -1,0 +1,66 @@
+{{- if .Values.serviceMonitor.enabled }}
+# ServiceMonitor — это НЕ встроенный ресурс Kubernetes, а CRD (Custom
+# Resource Definition), которую добавляет Prometheus Operator. Сам по себе
+# Prometheus (как в docker-compose.yml — статический prometheus.yml
+# со списком targets) ServiceMonitor не понимает: он появляется в кластере,
+# только когда там уже стоит Prometheus Operator (обычно ставят вместе со
+# всем стеком kube-prometheus-stack). Оператор следит за ServiceMonitor'ами
+# и сам генерирует под них конфиг для управляемого им Prometheus — то есть
+# ServiceMonitor это декларативная замена ручному редактированию
+# prometheus.yml на каждый новый сервис.
+#
+# Если включить serviceMonitor.enabled=true на кластере без Operator'а,
+# `helm install`/`helm upgrade` упадёт с ошибкой вида
+# "no matches for kind ServiceMonitor in version monitoring.coreos.com/v1" —
+# поэтому по умолчанию (values.yaml) эта фича выключена.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-server
+  # namespace явно не указываем — ServiceMonitor создаётся в том же
+  # неймспейсе, что и сам релиз (и наш Service), это важно: у ServiceMonitor
+  # spec.selector ищет Service'ы только в СВОЁМ неймспейсе. Если Prometheus
+  # Operator в кластере следит не за всеми неймспейсами, а за конкретным
+  # списком (через serviceMonitorNamespaceSelector на самом объекте
+  # Prometheus, которым мы тут не управляем) — попроси того, кто ставил
+  # Operator, добавить туда неймспейс релиза.
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # selector ищет Service (не Pod напрямую) по лейблам — находит наш
+  # service-server.yaml и через его spec.selector уже добирается до Pod'ов.
+  selector:
+    matchLabels:
+      {{- include "gophprofile.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  endpoints:
+    # "http" — то же имя порта, что и в service-server.yaml: у server
+    # один порт на всё (API + /metrics), поэтому и порт для скрейпа тот же.
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-worker
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "gophprofile.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

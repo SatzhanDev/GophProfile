@@ -1,0 +1,11 @@
+# Файлы, которые Helm не должен паковать в .tgz при `helm package` —
+# то же самое, что .gitignore/.dockerignore, только для чарта.
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,44 @@
+{{- if .Values.server.autoscaling.enabled }}
+# HPA сам добавляет/убирает реплики Deployment'а — раз в 15 секунд
+# (стандартный период у metrics-server) спрашивает текущую утилизацию
+# CPU/памяти у Pod'ов, сравнивает со target и по формуле
+# "желаемые реплики = текущие * (текущая утилизация / целевая)" решает,
+# растить или сокращать Deployment. Именно поэтому в deployment-server.yaml
+# поле replicas не задаётся, когда autoscaling включён — HPA и Helm иначе
+# спорили бы за право решать, сколько реплик должно быть.
+#
+# Два предварительных условия, без которых HPA не заработает:
+# 1. В кластере должен быть установлен metrics-server (у Rancher Desktop
+#    он обычно уже включён по умолчанию в его k3s; проверить —
+#    `kubectl top pods`, если команда не отвечает — metrics-server не стоит).
+# 2. У контейнера обязаны быть заданы resources.requests (см. values.yaml) —
+#    Utilization считается в процентах ИМЕННО от requests, без них HPA
+#    будет вечно показывать "unknown" вместо реальных цифр.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-server
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "gophprofile.fullname" . }}-server
+  minReplicas: {{ .Values.server.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.server.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.server.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.server.autoscaling.targetMemoryUtilizationPercentage }}
+{{- end }}
