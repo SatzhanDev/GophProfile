@@ -1,0 +1,76 @@
+{{- if .Values.migration.enabled }}
+# Helm-хук: этот Job создаётся и должен успешно отработать ДО того, как
+# Helm начнёт обновлять сами Deployment'ы. Если Job упадёт — Helm остановит
+# выкладку релиза, и новые Pod'ы server/worker не тронутся.
+#
+# Хук стоит только на pre-upgrade, СОЗНАТЕЛЬНО не на pre-install — вот
+# почему: pre-install хуки Helm выполняет ДО того, как создаст любые
+# обычные ресурсы чарта, включая наш же ConfigMap/Secret (см.
+# configmap.yaml/secret.yaml) — а этому Job'у они нужны через envFrom,
+# чтобы вообще знать, куда подключаться. На первой установке релиза
+# (когда ConfigMap/Secret ещё не существуют) этот Job просто не сможет
+# стартовать. Но на pre-install это и не нужно: cmd/server и cmd/worker
+# сами идемпотентно накатывают миграции при первом же старте (см.
+# комментарий в cmd/migrate/main.go), а на предыдущий релиз, который эти
+# ConfigMap/Secret обновляет, они уже гарантированно есть — там
+# pre-upgrade сработает штатно.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Ревизия релиза в имени — на каждый `helm upgrade` получаем новый Job
+  # с уникальным именем, а не пытаемся переиспользовать/перезаписать
+  # предыдущий (Job.spec почти целиком неизменяем после создания).
+  name: {{ include "gophprofile.fullname" . }}-migrate-{{ .Release.Revision }}
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    # before-hook-creation — удалить Job от прошлого upgrade перед
+    # созданием нового; hook-succeeded — а этот, новый, удалить сразу
+    # после успеха, чтобы не копить завершённые Job'ы в кластере.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  # Жёсткий потолок по времени на весь Job (все попытки суммарно), а не
+  # только на один контейнер: без него, если БД во время апгрейда недоступна,
+  # Job ретраит с экспоненциальными паузами до исчерпания backoffLimit, и
+  # всё это время `helm upgrade` висит заблокированным в ожидании хука —
+  # в проде это гарантированный затянувшийся инцидент. При превышении
+  # дедлайна Kubernetes сам завершает Job ошибкой, Helm фиксирует неудачу
+  # pre-upgrade хука и НЕ выкатывает новые Deployment'ы поверх
+  # несмигрированной схемы.
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "gophprofile.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      # Job обязан использовать Never или OnFailure — не Always,
+      # как у Deployment'ов: это одноразовая задача, а не долгоживущий процесс.
+      restartPolicy: Never
+      serviceAccountName: {{ include "gophprofile.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["./migrate"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "gophprofile.fullname" . }}-config
+            - secretRef:
+                name: {{ include "gophprofile.fullname" . }}-secrets
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

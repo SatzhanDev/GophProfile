@@ -1,0 +1,36 @@
+# Конфиг Prometheus: как часто опрашивать (scrape_interval) и кого именно
+# (scrape_configs) опрашивать. Каждая цель — это "host:port", по которому
+# Prometheus сам сходит на путь metrics_path (по умолчанию "/metrics") и
+# заберёт текстовый вывод promhttp.Handler() — того самого, что мы
+# подключили в internal/api/router.go (server) и cmd/worker/main.go (worker).
+#
+# Имена "server"/"worker" — это имена сервисов из docker-compose.yml:
+# Prometheus работает в той же docker-сети и резолвит их точно так же,
+# как наши server/worker резолвят "postgres"/"rabbitmq"/"minio"/"jaeger".
+global:
+  scrape_interval: 15s
+
+# rule_files — где лежат правила алертинга (условия "expr" + через сколько
+# времени срабатывает, см. docker/rules.yml). Prometheus сам, независимо от
+# scrape_configs, каждые evaluation_interval (по умолчанию тоже 15s)
+# пересчитывает все правила и решает, не пора ли какому-то алерту сработать.
+rule_files:
+  - /etc/prometheus/rules.yml
+
+# alerting — куда слать уже сработавшие алерты. Сам Prometheus умеет только
+# решить "условие выполнено" и отправить это дальше — группировкой,
+# подавлением дублей и решением "кому и когда написать" занимается уже
+# Alertmanager, отдельный сервис (см. docker-compose.yml и docker/alertmanager.yml).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: gophprofile-server
+    static_configs:
+      - targets: ["server:8080"]
+
+  - job_name: gophprofile-worker
+    static_configs:
+      - targets: ["worker:9100"]

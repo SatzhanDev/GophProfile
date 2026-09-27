@@ -5,15 +5,23 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/SatzhanDev/GophProfile/internal/domain"
 	"github.com/SatzhanDev/GophProfile/internal/repository"
+	"github.com/SatzhanDev/GophProfile/pkg/metrics"
 )
+
+var tracer = otel.Tracer("avatar-service")
 
 // MaxAvatarSize — лимит на размер загружаемого файла, 10 МБ по ТЗ.
 const MaxAvatarSize = 10 << 20
@@ -56,6 +64,17 @@ func NewAvatarService(repo repository.AvatarRepository, storage Storage, publish
 	return &AvatarService{repo: repo, storage: storage, publisher: publisher}
 }
 
+// translateRepoErr переводит ошибки репозитория в собственные ошибки
+// сервиса. Без этого repository.ErrAvatarNotFound утекал бы наружу вплоть
+// до HTTP-хендлеров, а те не должны знать о деталях реализации хранилища —
+// ни что это именно PostgreSQL, ни структуру его ошибок.
+func translateRepoErr(err error) error {
+	if errors.Is(err, repository.ErrAvatarNotFound) {
+		return ErrAvatarNotFound
+	}
+	return err
+}
+
 // Upload проверяет лимиты, сохраняет оригинал в S3 и создаёт метаданные в БД.
 //
 // detectedMimeType должен быть определён по содержимому файла (magic bytes),
@@ -64,12 +83,40 @@ func NewAvatarService(repo repository.AvatarRepository, storage Storage, publish
 // размера здесь — это уже вторая линия защиты: основную отсечку делает
 // http.MaxBytesReader ещё до захода в этот метод.
 func (s *AvatarService) Upload(ctx context.Context, userID, fileName, detectedMimeType string, size int64, reader io.Reader) (*domain.Avatar, error) {
+	// Спан на уровне бизнес-операции, а не только на уровне HTTP/БД/S3 —
+	// в Jaeger он станет "родителем" для всех спанов запросов к БД, S3
+	// и публикации в очередь внутри этого метода, и с его атрибутов
+	// удобно начинать разбор конкретной загрузки (кто грузил, что грузил).
+	ctx, span := tracer.Start(ctx, "upload_avatar")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("user_id", userID),
+		attribute.String("file_name", fileName),
+		attribute.Int64("file_size", size),
+	)
+
+	// outcome — метка для AvatarUploadsTotal; по умолчанию "success" и
+	// переключается на конкретную причину на каждой ветке отказа ниже.
+	// defer гарантирует, что метрика запишется ровно один раз, каким бы
+	// путём функция ни вышла — через return на пятой строке или на сотой.
+	start := time.Now()
+	outcome := "success"
+	defer func() {
+		metrics.AvatarUploadDuration.Observe(time.Since(start).Seconds())
+		metrics.AvatarUploadsTotal.WithLabelValues(outcome).Inc()
+	}()
+
 	if size > MaxAvatarSize {
+		outcome = "validation_error"
+		span.SetStatus(codes.Error, "file too large")
 		return nil, ErrFileTooLarge
 	}
 
 	ext, ok := allowedMimeTypes[detectedMimeType]
 	if !ok {
+		outcome = "validation_error"
+		span.SetStatus(codes.Error, "unsupported file type")
 		return nil, ErrUnsupportedType
 	}
 
@@ -83,13 +130,24 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName, detectedMi
 		ProcessingStatus: domain.ProcessingStatusPending,
 	}
 	avatar.S3Key = fmt.Sprintf("originals/%s%s", avatar.ID, ext)
+	span.SetAttributes(attribute.String("avatar_id", avatar.ID.String()))
 
 	if err := s.storage.Upload(ctx, avatar.S3Key, reader, size, detectedMimeType); err != nil {
+		outcome = "storage_error"
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "s3 upload failed")
 		return nil, fmt.Errorf("upload original to s3: %w", err)
 	}
 	avatar.UploadStatus = domain.UploadStatusCompleted
+	// Файл в S3 уже физически лежит, поэтому сразу учитываем его в оценке
+	// занятого места — даже если следующий шаг (запись в БД) провалится и
+	// мы вернём ошибку: место в S3 всё равно занято, метрика должна это отражать.
+	metrics.AvatarStorageBytes.Add(float64(size))
 
 	if err := s.repo.Create(ctx, avatar); err != nil {
+		outcome = "storage_error"
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "save metadata failed")
 		return nil, fmt.Errorf("save avatar metadata: %w", err)
 	}
 
@@ -105,7 +163,7 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName, detectedMi
 		S3Key:    avatar.S3Key,
 	}
 	if err := s.publisher.Publish(ctx, domain.RoutingKeyAvatarUploaded, event); err != nil {
-		slog.Error("failed to publish avatar upload event", "avatar_id", avatar.ID, "error", err)
+		slog.ErrorContext(ctx, "failed to publish avatar upload event", "avatar_id", avatar.ID, "error", err)
 	}
 
 	return avatar, nil
@@ -124,7 +182,7 @@ const thumbnailContentType = "image/jpeg"
 func (s *AvatarService) GetFile(ctx context.Context, id uuid.UUID, size string) (*domain.Avatar, io.ReadCloser, string, error) {
 	avatar, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", translateRepoErr(err)
 	}
 
 	key := avatar.S3Key
@@ -152,7 +210,7 @@ func (s *AvatarService) GetFile(ctx context.Context, id uuid.UUID, size string) 
 func (s *AvatarService) GetLatestForUser(ctx context.Context, userID string) (*domain.Avatar, io.ReadCloser, error) {
 	avatar, err := s.repo.GetLatestByUserID(ctx, userID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, translateRepoErr(err)
 	}
 
 	body, err := s.storage.Download(ctx, avatar.S3Key)
@@ -165,7 +223,11 @@ func (s *AvatarService) GetLatestForUser(ctx context.Context, userID string) (*d
 
 // GetMetadata отдаёт только метаданные, без содержимого файла.
 func (s *AvatarService) GetMetadata(ctx context.Context, id uuid.UUID) (*domain.Avatar, error) {
-	return s.repo.GetByID(ctx, id)
+	avatar, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, translateRepoErr(err)
+	}
+	return avatar, nil
 }
 
 // ListForUser — все активные аватарки пользователя.
@@ -177,7 +239,7 @@ func (s *AvatarService) ListForUser(ctx context.Context, userID string) ([]domai
 func (s *AvatarService) Delete(ctx context.Context, id uuid.UUID, requesterUserID string) error {
 	avatar, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return err
+		return translateRepoErr(err)
 	}
 
 	if avatar.UserID != requesterUserID {
@@ -196,7 +258,7 @@ func (s *AvatarService) DeleteLatestForUser(ctx context.Context, userID, request
 
 	avatar, err := s.repo.GetLatestByUserID(ctx, userID)
 	if err != nil {
-		return err
+		return translateRepoErr(err)
 	}
 
 	return s.softDeleteAndPublish(ctx, avatar)
@@ -211,8 +273,16 @@ func (s *AvatarService) DeleteLatestForUser(ctx context.Context, userID, request
 // как и при загрузке, ошибку публикации не считаем фатальной для запроса.
 func (s *AvatarService) softDeleteAndPublish(ctx context.Context, avatar *domain.Avatar) error {
 	if err := s.repo.SoftDelete(ctx, avatar.ID); err != nil {
+		metrics.AvatarDeletesTotal.WithLabelValues("storage_error").Inc()
 		return err
 	}
+	metrics.AvatarDeletesTotal.WithLabelValues("success").Inc()
+	// Симметрично AvatarStorageBytes.Add в Upload: воркер физически удалит
+	// файл из S3 позже и асинхронно, но с точки зрения продукта место
+	// освобождается уже сейчас — запись помечена удалённой, и API её больше
+	// никому не отдаст. Считаем только байты оригинала — по той же причине,
+	// что и при загрузке: размеры миниатюр в БД не хранятся, только их ключи.
+	metrics.AvatarStorageBytes.Sub(float64(avatar.SizeBytes))
 
 	keys := make([]string, 0, 1+len(avatar.ThumbnailS3Keys))
 	keys = append(keys, avatar.S3Key)
@@ -222,7 +292,7 @@ func (s *AvatarService) softDeleteAndPublish(ctx context.Context, avatar *domain
 
 	event := domain.AvatarDeleteEvent{AvatarID: avatar.ID.String(), S3Keys: keys}
 	if err := s.publisher.Publish(ctx, domain.RoutingKeyAvatarDeleted, event); err != nil {
-		slog.Error("failed to publish avatar delete event", "avatar_id", avatar.ID, "error", err)
+		slog.ErrorContext(ctx, "failed to publish avatar delete event", "avatar_id", avatar.ID, "error", err)
 	}
 
 	return nil

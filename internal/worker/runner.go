@@ -10,12 +10,20 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/SatzhanDev/GophProfile/pkg/broker"
+	"github.com/SatzhanDev/GophProfile/pkg/metrics"
 )
 
 const (
 	retryAttempts = 3
 	retryBaseWait = time.Second
 )
+
+var tracer = otel.Tracer("worker")
 
 // RunLoop читает сообщения из deliveries, разбирает JSON-тело в T и
 // передаёт в handle. Дженерик здесь ровно для того, чтобы не копировать
@@ -37,12 +45,27 @@ func RunLoop[T any](ctx context.Context, name string, deliveries <-chan amqp.Del
 			continue
 		}
 
-		handleErr := runWithRetry(ctx, name, handle, event)
+		// Достаём контекст трейсинга из заголовков сообщения — если
+		// publisher положил его туда (см. broker.Publisher.Publish),
+		// span ниже станет продолжением ТОГО ЖЕ трейса, что начался ещё
+		// на HTTP-запросе, который в итоге привёл к публикации события.
+		msgCtx := otel.GetTextMapPropagator().Extract(ctx, broker.HeaderCarrier(d.Headers))
+		msgCtx, span := tracer.Start(msgCtx, "worker.handle_"+name, trace.WithSpanKind(trace.SpanKindConsumer))
+
+		jobStart := time.Now()
+		handleErr := runWithRetry(msgCtx, name, handle, event)
+		metrics.WorkerJobDuration.WithLabelValues(name).Observe(time.Since(jobStart).Seconds())
 
 		if handleErr != nil {
-			slog.Error("handler failed after all retries, giving up",
+			metrics.WorkerJobsTotal.WithLabelValues(name, "failure").Inc()
+			span.RecordError(handleErr)
+			span.SetStatus(codes.Error, handleErr.Error())
+			slog.ErrorContext(msgCtx, "handler failed after all retries, giving up",
 				"consumer", name, "message_id", d.MessageId, "error", handleErr)
+		} else {
+			metrics.WorkerJobsTotal.WithLabelValues(name, "success").Inc()
 		}
+		span.End()
 
 		// Подтверждаем сообщение в любом случае. Свой ретрай мы уже
 		// исчерпали внутри runWithRetry; если бы мы сделали Nack с
@@ -58,6 +81,13 @@ func RunLoop[T any](ctx context.Context, name string, deliveries <-chan amqp.Del
 
 // runWithRetry вызывает handle до retryAttempts раз с экспоненциальной
 // паузой между попытками (1с, 2с, 4с) — как требует ТЗ.
+//
+// Пауза ждётся через select с ctx.Done(), а не через голый time.Sleep:
+// Sleep не реагирует на отмену контекста, поэтому при получении
+// SIGINT/SIGTERM во время паузы (до 4 секунд на последней попытке) main
+// завис бы, дожидаясь этого сна — притом что следующая попытка всё равно
+// провалится, раз контекст уже отменён. select возвращает управление
+// немедленно, как только контекст отменяется.
 func runWithRetry[T any](ctx context.Context, name string, handle func(context.Context, T) error, event T) error {
 	var err error
 	for attempt := 1; attempt <= retryAttempts; attempt++ {
@@ -66,9 +96,14 @@ func runWithRetry[T any](ctx context.Context, name string, handle func(context.C
 			return nil
 		}
 
-		slog.Warn("handler failed, will retry", "consumer", name, "attempt", attempt, "error", err)
+		slog.WarnContext(ctx, "handler failed, will retry", "consumer", name, "attempt", attempt, "error", err)
 		if attempt < retryAttempts {
-			time.Sleep(retryBaseWait * time.Duration(1<<(attempt-1))) // 1s, 2s, 4s...
+			wait := retryBaseWait * time.Duration(1<<(attempt-1)) // 1s, 2s, 4s...
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
 	return err

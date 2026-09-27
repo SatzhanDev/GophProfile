@@ -1,4 +1,4 @@
-.PHONY: run run-worker build fmt vet tidy lint test test-integration cover
+.PHONY: run run-worker run-migrate build fmt vet tidy lint test test-integration cover helm-lint helm-template
 
 run:
 	go run ./cmd/server
@@ -6,9 +6,17 @@ run:
 run-worker:
 	go run ./cmd/worker
 
+# cmd/migrate — тот же раннер миграций, что встроен в server/worker при
+# старте, но отдельным короткоживущим бинарником: используется Helm
+# pre-upgrade hook'ом (k8s/templates/job-migrate.yaml), но пригодится и
+# локально — накатить миграции без поднятия всего сервера целиком.
+run-migrate:
+	go run ./cmd/migrate
+
 build:
 	go build -o bin/server ./cmd/server
 	go build -o bin/worker ./cmd/worker
+	go build -o bin/migrate ./cmd/migrate
 
 fmt:
 	go fmt ./...
@@ -36,3 +44,17 @@ test-integration:
 # Показать процент покрытия по пакетам после `make test`.
 cover:
 	go tool cover -func=coverage.out
+
+# Статическая проверка Helm-чарта: синтаксис values.yaml/Chart.yaml,
+# обязательные поля, отсутствие явных ошибок в шаблонах. Не проверяет
+# соответствие реальной схеме объектов Kubernetes — для этого уже нужен
+# helm template + kubectl apply --dry-run=server на настоящем кластере.
+helm-lint:
+	helm lint ./k8s
+	helm lint ./k8s -f k8s/values-dev.yaml
+	helm lint ./k8s -f k8s/values-prod.yaml
+
+# Отрендерить итоговые манифесты без применения к кластеру — удобно
+# посмотреть глазами, что именно получится из шаблонов + values.
+helm-template:
+	helm template gophprofile ./k8s -f k8s/values-dev.yaml

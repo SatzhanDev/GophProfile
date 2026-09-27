@@ -1,0 +1,33 @@
+# Provisioning источников данных: Grafana читает этот файл при старте и
+# сама создаёт datasource'ы — без этого пришлось бы после каждого
+# `docker compose down -v` заново прописывать их руками через веб-UI.
+# Дашборды провижинятся точно так же — файлами в
+# docker/grafana/provisioning/dashboards/ (см. provider.yml там).
+#
+# uid у каждого источника задан явно и зафиксирован: дашборды в
+# provisioning/dashboards/*.json ссылаются на источник именно по uid
+# (`"datasource": {"uid": "prometheus"}`), а не по имени. Если бы мы не
+# задали uid сами, Grafana сгенерировала бы его случайно при первом
+# старте — тогда ссылки в заранее написанных JSON-дашбордах эту БД просто
+# не находили бы.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+
+  - name: Jaeger
+    type: jaeger
+    uid: jaeger
+    access: proxy
+    url: http://jaeger:16686

@@ -1,0 +1,62 @@
+# Оверрайды для продакшена:
+#   helm upgrade --install gophprofile ./k8s -f k8s/values-prod.yaml \
+#     --namespace gophprofile --create-namespace
+#
+# Обрати внимание: секции secrets здесь НЕТ — см. secrets.create ниже.
+# Пароли/ключи передаются в момент деплоя, а не хранятся в этом файле:
+# он коммитится в git, а реальные учётные данные — нет.
+#   --set secrets.dbPassword=$DB_PASSWORD
+#   --set secrets.s3AccessKey=$S3_ACCESS_KEY
+#   --set secrets.s3SecretKey=$S3_SECRET_KEY
+#   --set secrets.rabbitmqURL=$RABBITMQ_URL
+# (или ещё лучше — secrets.create: false и Secret создан заранее внешним
+# инструментом, см. комментарий ниже).
+
+image:
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+config:
+  appEnv: production
+  # Сюда — реальный домен фронтенда, если он живёт отдельно от самого
+  # GophProfile; "*" (дефолт из values.yaml) для прода не годится.
+  corsAllowedOrigins: "https://gophprofile.example.com"
+  # Реальные адреса управляемых/отдельно развёрнутых зависимостей —
+  # у этого чарта нет своего мнения о том, где живут Postgres/MinIO/
+  # RabbitMQ/Jaeger в проде (см. комментарий в values.yaml).
+  dbHost: gophprofile-postgresql.data.svc.cluster.local
+  s3Endpoint: s3.example.com
+  s3UseSSL: "true"
+
+ingress:
+  host: gophprofile.example.com
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # Пример для cert-manager, если TLS выпускается им — сам по себе
+    # cert-manager этот чарт тоже не разворачивает, только просит его
+    # выписать сертификат через эту аннотацию.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  # tls.enabled обязателен ВМЕСТЕ с аннотацией выше — одна аннотация
+  # cluster-issuer, без секции spec.tls в самом Ingress, HTTPS не включает
+  # (см. подробный комментарий в k8s/templates/ingress.yaml).
+  tls:
+    enabled: true
+    secretName: gophprofile-tls
+
+networkPolicy:
+  enabled: true
+
+serviceMonitor:
+  enabled: true
+
+# create: false — Secret с именем "<релиз>-gophprofile-secrets" должен
+# существовать в кластере ДО `helm install`, создан отдельно (CI/CD,
+# HashiCorp Vault + External Secrets Operator, Sealed Secrets и т.п.),
+# со всеми пятью ключами, которые ждут наши Deployment'ы (DB_USER,
+# DB_PASSWORD, S3_ACCESS_KEY, S3_SECRET_KEY, RABBITMQ_URL — см.
+# templates/secret.yaml). Если вместо этого проще передать значения прямо
+# через --set в команде деплоя (см. пример вверху файла) — оставь
+# secrets.create: true (дефолт из values.yaml) и просто не переопределяй
+# его здесь.
+secrets:
+  create: false

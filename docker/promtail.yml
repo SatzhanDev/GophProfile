@@ -1,0 +1,80 @@
+# Конфиг Promtail — агента, который читает логи Docker-контейнеров с диска
+# и пересылает их в Loki (см. клиента ниже). Работает по той же идее, что
+# Prometheus для метрик: не приложение "пушит" логи само, а отдельный
+# сборщик их "снимает" снаружи — приложению не нужно ничего знать про Loki.
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+# positions — файл, где Promtail запоминает, до какого места в каждом
+# лог-файле он уже дочитал. Нужен, чтобы при перезапуске Promtail не
+# отправил в Loki все логи заново с самого начала.
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker-containers
+    # docker_sd_configs — "service discovery" через Docker API: Promtail
+    # сам узнаёт список запущенных контейнеров и их лейблы (имя, образ,
+    # лейблы docker-compose) без необходимости перечислять их вручную.
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+
+    relabel_configs:
+      # __path__ — путь к файлу с логами конкретного контейнера на диске.
+      # Через Docker API (docker_sd_configs) Promtail получает только
+      # метаданные о контейнерах, а не сам текст логов — за ним нужно
+      # идти в файл, в который Docker (с драйвером json-file, он же
+      # используется по умолчанию) построчно пишет весь stdout/stderr
+      # контейнера: /var/lib/docker/containers/<id>/<id>-json.log.
+      - source_labels: ["__meta_docker_container_id"]
+        target_label: "__path__"
+        replacement: "/var/lib/docker/containers/$1/*-json.log"
+      # Дальше — просто удобные лейблы для поиска в Grafana: по какому
+      # контейнеру и по какому сервису docker-compose эта строчка лога.
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: "container"
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
+        target_label: "service"
+
+    pipeline_stages:
+      # Docker (драйвер json-file) оборачивает каждую строчку в свой
+      # конверт вида {"log": "...", "stream": "stdout", "time": "..."} —
+      # стадия "docker" это стандартный способ Promtail снять такой
+      # конверт и отдать дальше уже настоящее содержимое строки: в нашем
+      # случае это JSON, который пишет slog (см. pkg/telemetry/logging.go).
+      - docker: {}
+      # Вытаскиваем level (его добавляет сам slog.JSONHandler) и превращаем
+      # в лейбл — у него всего 4 значения (debug/info/warn/error), это
+      # дёшево и позволяет фильтровать логи по уровню прямо в Grafana:
+      # {service="server"} | level="error". (service="server"/"worker" —
+      # это имя сервиса из docker-compose.yml, НЕ то же самое, что
+      # OTEL-имя "gophprofile-server"/"gophprofile-worker" в Jaeger —
+      # два разных лейбла в двух разных системах.)
+      - json:
+          expressions:
+            level: level
+      - labels:
+          level:
+      # trace_id (его добавляет telemetry.TraceHandler, см.
+      # pkg/telemetry/logging.go) в лейбл НЕ превращаем и вообще никак
+      # не размечаем на этапе приёма лога. У каждого запроса свой
+      # уникальный trace_id, а лейблы Loki устроены так же, как в
+      # Prometheus: каждое новое значение лейбла заводит для него отдельный
+      # "стрим" на диске. Если бы trace_id стал лейблом, на каждый
+      # HTTP-запрос заводился бы новый стрим — тот же cardinality explosion,
+      # что мы уже разбирали для Prometheus и маршрутов с UUID
+      # в pkg/metrics/http_middleware.go, только на стороне Loki.
+      #
+      # Найти логи конкретного трейса всё равно можно — просто не заранее
+      # проиндексированным лейблом, а через LogQL-фильтр на момент запроса
+      # в Grafana Explore: {service="server"} | json | trace_id="<id>".
+      # Это и есть та самая связка "открыл трейс в Jaeger → скопировал
+      # trace_id → нашёл по нему логи в Grafana", просто поиск считается
+      # в момент запроса, а не заранее на каждый лог.

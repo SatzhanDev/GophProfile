@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-server
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  # replicas указываем только если автомасштабирование выключено: если
+  # включён HPA (см. hpa-server.yaml), он сам управляет этим полем, и если
+  # Helm на каждом `helm upgrade` будет упрямо возвращать replicas к
+  # значению из values.yaml, это будет драться с HPA — Deployment начнёт
+  # то расти, то откатываться на каждый деплой.
+  {{- if not .Values.server.autoscaling.enabled }}
+  replicas: {{ .Values.server.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "gophprofile.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "gophprofile.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+      annotations:
+        # checksum/* — не читаются приложением, нужны только Kubernetes'у:
+        # если содержимое ConfigMap/Secret не поменялось, эти аннотации
+        # тоже не поменяются, и Deployment останется как есть. Но если
+        # поменялось — у пода в шаблоне меняется метаданные, значит вся
+        # спецификация пода стала другой, и Deployment создаёт новый
+        # ReplicaSet взамен старого. Без этого трюка под, уже читающий
+        # переменные из ConfigMap/Secret через envFrom, никогда бы не
+        # перезапустился сам: Kubernetes в принципе не отслеживает "эта
+        # переменная окружения устарела" — только "изменилась ли
+        # спецификация самого пода".
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "gophprofile.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.server.terminationGracePeriodSeconds }}
+      containers:
+        - name: server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Явно переопределяем command: Dockerfile по умолчанию запускает
+          # "./server" (см. CMD в docker/Dockerfile), но не полагаемся на
+          # умолчание образа — так намерение видно прямо в манифесте.
+          command: ["./server"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.server.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "gophprofile.fullname" . }}-config
+            - secretRef:
+                name: {{ include "gophprofile.fullname" . }}-secrets
+          # livenessProbe: если /health не отвечает 200 — kubelet считает
+          # процесс зависшим и перезапускает контейнер. initialDelaySeconds
+          # больше, чем у readiness — не убиваем под, пока он ещё стартует
+          # (подключается к БД/S3/RabbitMQ, накатывает миграции).
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          # readinessProbe: если /health не отвечает 200 — под НЕ убивают,
+          # а просто убирают из Endpoints у Service, пока не восстановится.
+          # Так Service (и Ingress через него) не шлёт трафик на под,
+          # который ещё не готов принимать запросы.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          # preStop: k8s посылает SIGTERM и ОДНОВРЕМЕННО начинает убирать
+          # под из Endpoints Service — эти два события не синхронизированы,
+          # и часть кластера может продолжать слать трафик на под ещё
+          # секунду-другую после SIGTERM, пока обновление Endpoints не
+          # разошлось по всем kube-proxy. preStop-пауза перед реальной
+          # остановкой даёт этому разойтись, прежде чем graceful shutdown
+          # в cmd/server/main.go начнёт закрывать сервер.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem (см. securityContext) запрещает запись
+            # куда бы то ни было в контейнере, кроме примонтированных
+            # volume — /tmp тоже попадает под запрет, а часть стандартной
+            # библиотеки Go может рассчитывать на то, что туда можно писать.
+            # emptyDir — временное хранилище на весь жизненный цикл пода,
+            # не персистентное и не важное для нас, просто "разрешённое место".
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

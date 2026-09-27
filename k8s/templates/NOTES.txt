@@ -1,0 +1,32 @@
+GophProfile развёрнут в неймспейсе {{ .Release.Namespace }} (релиз {{ .Release.Name }}).
+
+{{- if .Values.ingress.enabled }}
+
+Веб-интерфейс и API доступны через Ingress:
+  http://{{ .Values.ingress.host }}/web/upload
+
+Если работаешь через Rancher Desktop без своего DNS, добавь запись в /etc/hosts:
+  echo "127.0.0.1 {{ .Values.ingress.host }}" | sudo tee -a /etc/hosts
+{{- else }}
+
+Ingress выключен (ingress.enabled=false). Доступ к server — через port-forward:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "gophprofile.fullname" . }}-server 8080:80
+{{- end }}
+
+Проверить, что оба компонента поднялись:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+Посмотреть логи воркера:
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/component=worker -f
+
+{{- if .Values.serviceMonitor.enabled }}
+
+ServiceMonitor включён — Prometheus Operator должен сам обнаружить server
+и worker в течение минуты (если сам Operator установлен в кластере).
+{{- else }}
+
+ServiceMonitor выключен (serviceMonitor.enabled=false). Если в кластере
+есть Prometheus Operator (например, из kube-prometheus-stack) — включи
+через --set serviceMonitor.enabled=true, чтобы метрики начали собираться
+автоматически.
+{{- end }}

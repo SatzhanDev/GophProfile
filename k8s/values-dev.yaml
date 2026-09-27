@@ -1,0 +1,50 @@
+# Оверрайды для локальной разработки (Rancher Desktop):
+#   docker build -t gophprofile:local -f docker/Dockerfile .
+#   helm install gophprofile ./k8s -f k8s/values-dev.yaml
+#
+# Helm читает несколько -f по порядку и накладывает их друг на друга поверх
+# базового values.yaml — здесь только то, что реально должно отличаться
+# от прод-дефолтов, а не копия всего файла целиком.
+
+image:
+  tag: local
+  # Never — образ уже собран локально в тот же Docker-демон, который
+  # использует Rancher Desktop (его Kubernetes и `docker build` на хосте
+  # смотрят в один и тот же daemon). IfNotPresent тоже сработал бы, пока
+  # образ есть локально, но Never честнее показывает намерение: "наружу,
+  # в registry, вообще не ходи".
+  pullPolicy: Never
+
+server:
+  replicaCount: 1
+  autoscaling:
+    enabled: false # незачем гонять HPA на одном локальном узле
+
+worker:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+
+ingress:
+  host: gophprofile.local
+
+# На домашнем/учебном кластере обычно нет ни ingress-controller в
+# неймспейсе "ingress-nginx", ни Prometheus Operator в "monitoring" —
+# включённая NetworkPolicy в этом случае просто заблокирует ВЕСЬ трафик
+# наглухо (напомним: любая NetworkPolicy на под переключает его в
+# "deny all, кроме explicitly разрешённого"). Выключаем для простоты
+# локальной разработки — в проде обязательно включать, см. values-prod.yaml.
+networkPolicy:
+  enabled: false
+
+serviceMonitor:
+  enabled: false
+
+# Учётные данные — подставлены под наш же docker-compose.yml (Sprint 1-2),
+# если Postgres/MinIO/RabbitMQ подняты им же, а не отдельно в кластере.
+secrets:
+  dbUser: gophprofile
+  dbPassword: gophprofile
+  s3AccessKey: minioadmin
+  s3SecretKey: minioadmin
+  rabbitmqURL: "amqp://guest:guest@rabbitmq:5672/"

@@ -1,0 +1,18 @@
+apiVersion: v2
+name: gophprofile
+description: >-
+  Helm-чарт микросервиса GophProfile — загрузка, хранение и раздача
+  аватарок пользователей по email/user-id. Включает server (REST API),
+  worker (асинхронная обработка через RabbitMQ) и всю обвязку вокруг них
+  (ConfigMap/Secret, HPA, ServiceMonitor, NetworkPolicy).
+type: application
+version: 0.1.0
+# appVersion — версия самого приложения (то, что попадёт в тег Docker-образа
+# по умолчанию, см. values.yaml: image.tag). version выше — версия ЧАРТА
+# (схемы манифестов), это разные числа: можно поменять форму Deployment'а,
+# не меняя ни строчки в самом Go-коде, и это уже будет новая версия чарта.
+appVersion: "1.0.0"
+keywords:
+  - avatars
+  - gophprofile
+  - go

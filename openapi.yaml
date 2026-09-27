@@ -1,0 +1,329 @@
+openapi: 3.0.3
+info:
+  title: GophProfile API
+  description: >-
+    Микросервис для загрузки, хранения и раздачи аватарок пользователей.
+    Эта спецификация описывает только REST API (/api/v1, /health,
+    /metrics) — веб-интерфейс (/web/upload, /web/gallery/{userID}) отдаёт
+    HTML-страницы, а не JSON, и в OpenAPI не документируется.
+  version: "1.0.0"
+servers:
+  - url: http://localhost:8080
+    description: Локальный запуск (docker-compose или go run ./cmd/server)
+  - url: http://gophprofile.local
+    description: Локальный кластер Kubernetes (Rancher Desktop, см. k8s/values-dev.yaml)
+
+tags:
+  - name: avatars
+    description: Загрузка, получение, удаление аватарок
+  - name: system
+    description: Служебные эндпоинты (healthcheck, метрики)
+
+paths:
+  /api/v1/avatars:
+    post:
+      tags: [avatars]
+      summary: Загрузить аватарку
+      description: >-
+        Оригинал сохраняется в S3 синхронно; миниатюры (100x100, 300x300)
+        генерирует воркер асинхронно после события в RabbitMQ — поэтому
+        сразу после 201 они ещё какое-то время недоступны
+        (processing_status="pending"/"processing").
+      operationId: uploadAvatar
+      parameters:
+        - $ref: "#/components/parameters/XUserID"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: JPEG, PNG или WebP, не больше 10 МБ.
+      responses:
+        "201":
+          description: Аватарка принята и сохранена
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+        "400":
+          description: Неверный формат файла или отсутствует X-User-ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Файл больше 10 МБ
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileTooLargeResponse"
+
+  /api/v1/avatars/{avatarID}:
+    parameters:
+      - $ref: "#/components/parameters/AvatarID"
+    get:
+      tags: [avatars]
+      summary: Получить аватарку по ID
+      operationId: getAvatar
+      parameters:
+        - name: size
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["100x100", "300x300", "original"]
+          description: >-
+            Без параметра или "original" — оригинал. Другой размер — уже
+            сгенерированная воркером миниатюра; если она ещё не готова,
+            вернётся 404.
+      responses:
+        "200":
+          description: Бинарные данные изображения
+          headers:
+            Cache-Control:
+              schema: { type: string }
+            ETag:
+              schema: { type: string }
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        "404":
+          description: Аватарка не найдена, либо запрошенный размер ещё не сгенерирован
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      tags: [avatars]
+      summary: Удалить аватарку (мягкое удаление)
+      description: >-
+        Помечает запись удалённой в БД синхронно; сам файл и миниатюры
+        стираются из S3 асинхронно воркером по событию в RabbitMQ.
+      operationId: deleteAvatar
+      parameters:
+        - $ref: "#/components/parameters/XUserID"
+      responses:
+        "204":
+          description: Успешно удалено
+        "403":
+          description: Попытка удалить чужую аватарку
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Аватарка не найдена
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/avatars/{avatarID}/metadata:
+    parameters:
+      - $ref: "#/components/parameters/AvatarID"
+    get:
+      tags: [avatars]
+      summary: Получить метаданные аватарки
+      operationId: getAvatarMetadata
+      responses:
+        "200":
+          description: Метаданные найдены
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvatarMetadata"
+        "404":
+          description: Аватарка не найдена
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/users/{userID}/avatar:
+    parameters:
+      - $ref: "#/components/parameters/UserIDPath"
+    get:
+      tags: [avatars]
+      summary: Получить самую свежую аватарку пользователя
+      description: >-
+        Ключевой эндпоинт продукта: если у пользователя есть аватарка —
+        отдаём её, если нет — картинку-заглушку (тоже 200, не 404), чтобы
+        сторонняя платформа никогда не получала "дырку" вместо изображения.
+      operationId: getUserAvatar
+      responses:
+        "200":
+          description: Аватарка пользователя либо заглушка
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+    delete:
+      tags: [avatars]
+      summary: Удалить самую свежую аватарку пользователя
+      operationId: deleteUserAvatar
+      parameters:
+        - $ref: "#/components/parameters/XUserID"
+      responses:
+        "204":
+          description: Успешно удалено
+        "403":
+          description: X-User-ID не совпадает с userID из пути
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: У пользователя нет аватарки
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/users/{userID}/avatars:
+    parameters:
+      - $ref: "#/components/parameters/UserIDPath"
+    get:
+      tags: [avatars]
+      summary: Список всех аватарок пользователя
+      operationId: listUserAvatars
+      responses:
+        "200":
+          description: Список метаданных (может быть пустым)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AvatarMetadata"
+
+  /health:
+    get:
+      tags: [system]
+      summary: Проверка работоспособности сервиса и его зависимостей
+      description: >-
+        Используется Kubernetes-пробами (livenessProbe/readinessProbe,
+        см. k8s/templates/deployment-server.yaml).
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Все проверенные компоненты в порядке
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Хотя бы один компонент недоступен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /metrics:
+    get:
+      tags: [system]
+      summary: Метрики Prometheus
+      description: >-
+        Текстовый формат экспозиции Prometheus, а не JSON — сюда стучится
+        Prometheus (см. docker/prometheus.yml, k8s/templates/servicemonitor.yaml),
+        а не клиенты API. У worker то же самое отдаётся на отдельном порту
+        METRICS_PORT, а не через основной API.
+      operationId: metrics
+      responses:
+        "200":
+          description: Метрики в формате Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  parameters:
+    XUserID:
+      name: X-User-ID
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-zA-Z0-9_-]{1,255}$'
+      description: Идентификатор пользователя, от чьего имени выполняется действие.
+    AvatarID:
+      name: avatarID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    UserIDPath:
+      name: userID
+      in: path
+      required: true
+      schema:
+        type: string
+
+  schemas:
+    UploadResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string }
+        url: { type: string }
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+        created_at: { type: string, format: date-time }
+
+    Thumbnail:
+      type: object
+      properties:
+        size: { type: string, example: "100x100" }
+        url: { type: string }
+
+    AvatarMetadata:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string }
+        file_name: { type: string }
+        mime_type: { type: string }
+        size: { type: integer, format: int64 }
+        thumbnails:
+          type: array
+          items:
+            $ref: "#/components/schemas/Thumbnail"
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ComponentStatus:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, down] }
+        error: { type: string }
+
+    HealthResponse:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        time: { type: string, format: date-time }
+        components:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ComponentStatus"
+
+    ErrorResponse:
+      type: object
+      properties:
+        error: { type: string }
+        details: { type: string }
+
+    FileTooLargeResponse:
+      type: object
+      properties:
+        error: { type: string, example: "File too large" }
+        max_size: { type: integer, example: 10485760 }

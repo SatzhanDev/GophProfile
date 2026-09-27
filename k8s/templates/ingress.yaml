@@ -1,0 +1,40 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "gophprofile.fullname" . }}
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  # Без этой секции контроллер nginx не будет знать, на каком порту
+  # слушать HTTPS и из какого Secret брать сертификат — даже если
+  # cert-manager (через аннотацию cluster-issuer выше) успешно его выпустит.
+  # secretName сюда же передаёт cert-manager'у ingress-shim: увидев именно
+  # эту комбинацию (аннотация + tls.secretName), он сам создаст Certificate
+  # и наполнит указанный Secret — вручную заводить его не нужно.
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # Только server: у worker снаружи кластера смотреть нечего,
+          # к нему обращаются только Prometheus (через ServiceMonitor)
+          # изнутри кластера.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "gophprofile.fullname" . }}-server
+                port:
+                  number: 80
+{{- end }}

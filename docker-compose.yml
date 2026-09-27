@@ -28,7 +28,15 @@ x-app-env: &app-env
   CORS_ALLOWED_ORIGINS: "*"
   RATE_LIMIT_RPS: "5"
   RATE_LIMIT_BURST: "10"
+  # OTEL_SERVICE_NAME намеренно не задан здесь: у server и worker он
+  # разный (см. defaultServiceName в их cmd/*/main.go), а тут переменные
+  # общие на оба сервиса.
+  OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
   MIGRATIONS_PATH: /app/migrations
+  # У worker свой отдельный HTTP-сервер только под /metrics (см.
+  # cmd/worker/main.go) — server эту переменную получает тоже (общий
+  # блок), но не использует: его /metrics висит на SERVER_PORT.
+  METRICS_PORT: "9100"
 
 services:
   postgres:
@@ -53,7 +61,12 @@ services:
       retries: 5
 
   minio:
-    image: minio/minio:latest
+    # Конкретная версия вместо latest — воспроизводимость: latest сегодня
+    # и latest через полгода могут быть совершенно разными образами,
+    # а мы хотим, чтобы окружение поднималось одинаково у всех и всегда.
+    # Если конкретно этот тег к моменту запуска уже снят с Docker Hub —
+    # возьми любой актуальный с https://hub.docker.com/r/minio/minio/tags.
+    image: minio/minio:RELEASE.2024-01-16T16-07-38Z
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -84,6 +97,18 @@ services:
       timeout: 5s
       retries: 5
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.54
+    restart: unless-stopped
+    environment:
+      # По умолчанию all-in-one принимает трейсы только в своём "родном"
+      # формате (Jaeger protocol); OTLP — уже отраслевой стандарт, на нём
+      # и построен наш pkg/telemetry, поэтому явно включаем приём OTLP.
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # веб-UI Jaeger — http://localhost:16686
+      - "4317:4317"   # OTLP/gRPC — сюда шлёт трейсы наше приложение
+
   server:
     build:
       context: .
@@ -100,6 +125,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+      jaeger:
+        condition: service_started
 
   worker:
     build:
@@ -109,6 +136,8 @@ services:
     restart: on-failure
     environment:
       <<: *app-env
+    ports:
+      - "9100:9100" # /metrics воркера — для отладки с хоста, curl localhost:9100/metrics
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,8 +145,106 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+      jaeger:
+        condition: service_started
+
+  migrate:
+    # Тот же бинарник, которым в Kubernetes управляет Helm pre-upgrade hook
+    # (k8s/templates/job-migrate.yaml) — здесь просто способ прогнать его
+    # руками локально, не поднимая ради этого весь server. profiles: ["jobs"]
+    # значит, что обычный `docker compose up` эту службу не тронет —
+    # запускается только явно: `docker compose --profile jobs run --rm migrate`.
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["./migrate"]
+    environment:
+      <<: *app-env
+    profiles: ["jobs"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/rules.yml:/etc/prometheus/rules.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090" # веб-UI и API Prometheus — http://localhost:9090
+    depends_on:
+      - server
+      - worker
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    volumes:
+      - ./docker/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "9093:9093" # веб-UI Alertmanager — http://localhost:9093 (активные алерты, статус группировки)
+
+  loki:
+    # Хранилище и API для логов. Своего веб-интерфейса у Loki нет — логи
+    # смотрят либо через Grafana (Explore), либо через отдельную утилиту
+    # logcli. Конфиг не переопределяем: дефолтный /etc/loki/local-config.yaml,
+    # который уже зашит в образ, хранит данные под /loki внутри контейнера —
+    # для локальной разработки этого достаточно, снаружи только монтируем
+    # volume, чтобы логи переживали перезапуск контейнера.
+    image: grafana/loki:3.0.0
+    restart: unless-stopped
+    ports:
+      - "3100:3100" # HTTP API Loki — сюда Promtail пушит логи, отсюда их читает Grafana
+    volumes:
+      - loki_data:/loki
+
+  promtail:
+    # Promtail — агент, который читает логи контейнеров с диска и
+    # пересылает их в Loki. Ему нужен доступ и к Docker-сокету (чтобы через
+    # Docker API узнавать, какие контейнеры вообще есть и какие у них
+    # лейблы), и к самим файлам логов на диске (Docker API логи не отдаёт,
+    # только метаданные) — отсюда два volume ниже, оба на чтение.
+    image: grafana/promtail:3.0.0
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./docker/promtail.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    restart: unless-stopped
+    environment:
+      # Анонимный доступ с правами Admin — годится для локальной разработки
+      # и учебного проекта; для прод-деплоя так делать не стоит (см. k8s/
+      # или отдельный README-раздел, если понадобится реальный логин).
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      # Provisioning — способ Grafana сама, при старте, подхватить источники
+      # данных (и позже дашборды) из файлов, а не через ручные клики в UI.
+      # Так конфигурация Grafana тоже живёт в git, а не только "у меня в браузере".
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000" # веб-UI Grafana — http://localhost:3000
+    depends_on:
+      - prometheus
+      - loki
+      - jaeger
 
 volumes:
   postgres_data:
   minio_data:
   rabbitmq_data:
+  prometheus_data:
+  loki_data:
+  grafana_data:
+  alertmanager_data:

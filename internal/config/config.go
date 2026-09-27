@@ -68,6 +68,16 @@ type RateLimitConfig struct {
 	Burst             int
 }
 
+// TelemetryConfig содержит настройки трейсинга (OpenTelemetry → Jaeger).
+// ServiceName нарочно может быть пустым: server и worker — два разных
+// процесса, читающих одну и ту же конфигурацию, и у них должны быть разные
+// имена в Jaeger (иначе их трейсы будет не отличить друг от друга) — за
+// дефолтное имя для каждого процесса отвечает его собственный main.go.
+type TelemetryConfig struct {
+	ServiceName  string
+	OTLPEndpoint string
+}
+
 // Config — корневая структура конфигурации всего приложения.
 type Config struct {
 	Env            string
@@ -77,7 +87,14 @@ type Config struct {
 	Broker         BrokerConfig
 	CORS           CORSConfig
 	RateLimit      RateLimitConfig
+	Telemetry      TelemetryConfig
 	MigrationsPath string
+	// MetricsPort — порт отдельного HTTP-сервера с /metrics для cmd/worker.
+	// У server свой /metrics уже висит на основном порту (см. internal/api/router.go) —
+	// он и так поднимает HTTP-сервер для API. У worker никакого HTTP-сервера
+	// нет вообще (это consumer RabbitMQ), поэтому под один Prometheus-эндпоинт
+	// заводится отдельный, специально для этого лёгкий сервер (см. cmd/worker/main.go).
+	MetricsPort int
 }
 
 // Load читает конфигурацию из переменных окружения.
@@ -114,6 +131,39 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	metricsPort, err := getEnvInt("METRICS_PORT", 9100)
+	if err != nil {
+		return nil, err
+	}
+
+	// Для этих четырёх параметров дефолтов намеренно нет: это учётные
+	// данные, и их дефолты ("gophprofile", "minioadmin", "guest:guest")
+	// — общеизвестные значения по умолчанию у Postgres/MinIO/RabbitMQ.
+	// Если их не задать явно при деплое (в докере/проде), сервис молча
+	// стартовал бы с небезопасными реквизитами. Лучше упасть сразу и
+	// явно на старте (fail fast), чем незаметно оказаться уязвимым.
+	// Для локальной разработки этого не нужно бояться — значения
+	// задаются в .env (см. .env.example), который подхватывается сам.
+	dbPassword, err := getEnvRequired("DB_PASSWORD")
+	if err != nil {
+		return nil, err
+	}
+
+	s3AccessKey, err := getEnvRequired("S3_ACCESS_KEY")
+	if err != nil {
+		return nil, err
+	}
+
+	s3SecretKey, err := getEnvRequired("S3_SECRET_KEY")
+	if err != nil {
+		return nil, err
+	}
+
+	rabbitmqURL, err := getEnvRequired("RABBITMQ_URL")
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Env: getEnv("APP_ENV", "development"),
 		Server: ServerConfig{
@@ -125,19 +175,19 @@ func Load() (*Config, error) {
 			Host:     getEnv("DB_HOST", "localhost"),
 			Port:     dbPort,
 			User:     getEnv("DB_USER", "gophprofile"),
-			Password: getEnv("DB_PASSWORD", "gophprofile"),
+			Password: dbPassword,
 			Name:     getEnv("DB_NAME", "gophprofile"),
 			SSLMode:  getEnv("DB_SSLMODE", "disable"),
 		},
 		S3: S3Config{
 			Endpoint:  getEnv("S3_ENDPOINT", "localhost:9000"),
-			AccessKey: getEnv("S3_ACCESS_KEY", "minioadmin"),
-			SecretKey: getEnv("S3_SECRET_KEY", "minioadmin"),
+			AccessKey: s3AccessKey,
+			SecretKey: s3SecretKey,
 			Bucket:    getEnv("S3_BUCKET", "avatars"),
 			UseSSL:    s3UseSSL,
 		},
 		Broker: BrokerConfig{
-			URL: getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5673/"),
+			URL: rabbitmqURL,
 		},
 		CORS: CORSConfig{
 			AllowedOrigins: getEnvStringSlice("CORS_ALLOWED_ORIGINS", []string{"*"}),
@@ -146,7 +196,12 @@ func Load() (*Config, error) {
 			RequestsPerSecond: rateLimitRPS,
 			Burst:             rateLimitBurst,
 		},
+		Telemetry: TelemetryConfig{
+			ServiceName:  getEnv("OTEL_SERVICE_NAME", ""),
+			OTLPEndpoint: getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
+		},
 		MigrationsPath: getEnv("MIGRATIONS_PATH", "migrations"),
+		MetricsPort:    metricsPort,
 	}
 
 	return cfg, nil
@@ -157,6 +212,17 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getEnvRequired — как getEnv, но без дефолта: для чувствительных
+// параметров (пароли, ключи доступа), у которых не должно быть
+// "безопасного значения по умолчанию" в принципе.
+func getEnvRequired(key string) (string, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return "", fmt.Errorf("required environment variable %s is not set", key)
+	}
+	return v, nil
 }
 
 func getEnvInt(key string, fallback int) (int, error) {

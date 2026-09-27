@@ -53,7 +53,7 @@ func (h *UploadHandler) Handle(ctx context.Context, event domain.AvatarUploadEve
 		if errors.Is(err, repository.ErrAvatarNotFound) {
 			// Аватарку успели удалить, пока сообщение ждало обработки —
 			// это нормальный сценарий гонки, а не ошибка: обрабатывать нечего.
-			slog.Info("avatar no longer exists, skipping", "avatar_id", event.AvatarID)
+			slog.InfoContext(ctx, "avatar no longer exists, skipping", "avatar_id", event.AvatarID)
 			return nil
 		}
 		return fmt.Errorf("get avatar: %w", err)
@@ -63,7 +63,7 @@ func (h *UploadHandler) Handle(ctx context.Context, event domain.AvatarUploadEve
 	// это повторная доставка одного и того же сообщения от RabbitMQ —
 	// не переделываем работу заново.
 	if avatar.ProcessingStatus == domain.ProcessingStatusCompleted {
-		slog.Info("avatar already processed, skipping", "avatar_id", event.AvatarID)
+		slog.InfoContext(ctx, "avatar already processed, skipping", "avatar_id", event.AvatarID)
 		return nil
 	}
 
@@ -74,7 +74,7 @@ func (h *UploadHandler) Handle(ctx context.Context, event domain.AvatarUploadEve
 	thumbKeys, err := h.generateThumbnails(ctx, avatar)
 	if err != nil {
 		if markErr := h.repo.UpdateProcessingStatus(ctx, avatarID, domain.ProcessingStatusFailed); markErr != nil {
-			slog.Error("failed to mark avatar as failed", "avatar_id", event.AvatarID, "error", markErr)
+			slog.ErrorContext(ctx, "failed to mark avatar as failed", "avatar_id", event.AvatarID, "error", markErr)
 		}
 		return fmt.Errorf("generate thumbnails: %w", err)
 	}
@@ -87,7 +87,7 @@ func (h *UploadHandler) Handle(ctx context.Context, event domain.AvatarUploadEve
 		return fmt.Errorf("mark completed: %w", err)
 	}
 
-	slog.Info("avatar processed", "avatar_id", event.AvatarID, "thumbnails", len(thumbKeys))
+	slog.InfoContext(ctx, "avatar processed", "avatar_id", event.AvatarID, "thumbnails", len(thumbKeys))
 	return nil
 }
 

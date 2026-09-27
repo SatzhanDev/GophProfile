@@ -1,0 +1,200 @@
+# Значения по умолчанию для чарта gophprofile. Это "базовый" values.yaml —
+# он должен быть рабочим сам по себе (например, для CI, которое просто
+# делает `helm template`/`helm lint`), а под конкретное окружение его
+# переопределяют через -f values-dev.yaml / -f values-prod.yaml (Helm берёт
+# файлы по порядку слева направо, последний побеждает при конфликте ключей).
+
+# --- Образ ---
+# server и worker — это ОДИН и тот же образ (см. docker/Dockerfile — там
+# оба бинарника собираются в один multi-stage build), разница только
+# в command контейнера. Поэтому image один на весь чарт, а не по одному
+# на server/worker.
+image:
+  repository: gophprofile
+  tag: latest
+  # Для чистого локального прогона через Rancher Desktop без registry:
+  # собери образ `docker build -t gophprofile:local -f docker/Dockerfile .`
+  # и переопredели image.tag=local, image.pullPolicy=Never (см. values-dev.yaml) —
+  # иначе kubelet попробует ПОТЯНУТЬ образ из внешнего registry и не найдёт его.
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+# --- HTTP-сервер ---
+server:
+  replicaCount: 3
+  port: 8080
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+# --- Воркер (обработчик событий RabbitMQ) ---
+worker:
+  replicaCount: 2
+  metricsPort: 9100
+  # Воркеру даём чуть больше времени на остановку, чем серверу: если он
+  # успел взять сообщение в обработку (генерация миниатюр — по сути,
+  # синхронная CPU-работа), лучше дать ему дошить текущий файл, чем
+  # оборвать на середине и заставить RabbitMQ redeliver его кому-то ещё.
+  terminationGracePeriodSeconds: 45
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+# --- Ingress (внешний доступ к server) ---
+ingress:
+  enabled: true
+  className: nginx
+  host: gophprofile.local
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+  tls:
+    # Выключено по умолчанию: локальный кластер (Rancher Desktop) обычно
+    # без cert-manager и без реального DNS-имени, самоподписанный
+    # сертификат под "gophprofile.local" никакой пользы не принесёт.
+    # Аннотация cert-manager.io/cluster-issuer сама по себе HTTPS не
+    # включает — она только просит cert-manager выписать сертификат;
+    # без spec.tls в самом Ingress nginx-controller не знает, на каком
+    # порту слушать HTTPS и из какого Secret брать сертификат. Включай
+    # tls.enabled вместе с этой аннотацией одновременно, порознь толку нет.
+    enabled: false
+    # secretName — куда cert-manager (через ingress-shim, следящий за
+    # аннотацией cluster-issuer) сам положит выпущенный сертификат;
+    # секрет заранее создавать не нужно, cert-manager создаст его сам.
+    secretName: gophprofile-tls
+
+# --- Несекретный конфиг (уходит в ConfigMap) ---
+# Соответствует internal/config.Config — все переменные, которые НЕ
+# являются учётными данными. Разбито по смыслу тех же ENV-имён, что
+# читает internal/config.Load().
+#
+# ВАЖНО: этот чарт разворачивает только само приложение GophProfile
+# (server + worker) — PostgreSQL/RabbitMQ/MinIO/Jaeger он не деплоит (это
+# ровно то же самое разделение ответственности, что и в примерах манифестов
+# из ТЗ: там Secret тоже просто ссылается на готовый DATABASE_URL, а не
+# поднимает базу сам). В реальном кластере эти зависимости либо уже есть
+# (managed-БД, отдельно поставленный bitnami/postgresql и т.п.), либо их
+# нужно поставить самостоятельно — и подставить сюда их реальные адреса.
+# Значения по умолчанию ниже — просто заглушки под имена сервисов из
+# нашего же docker-compose.yml, для ориентира.
+config:
+  appEnv: production
+  dbHost: postgres
+  dbPort: "5432"
+  dbName: gophprofile
+  dbSSLMode: disable
+  s3Endpoint: "minio:9000"
+  s3Bucket: avatars
+  s3UseSSL: "false"
+  corsAllowedOrigins: "*"
+  rateLimitRPS: "5"
+  rateLimitBurst: "10"
+  migrationsPath: /app/migrations
+  # Пример адреса OTLP-коллектора Jaeger, если он развёрнут в кластере
+  # отдельным релизом (например, jaeger-operator) в неймспейсе observability.
+  # Смени под свою реальную установку — за пределами этого чарта.
+  otelExporterEndpoint: "jaeger-collector.observability.svc.cluster.local:4317"
+
+# --- Секреты (уходят в Secret) ---
+# Пустые строки — НЕ забытые заглушки, а осознанный fail-fast: то же самое
+# решение, что и в internal/config.Load() (getEnvRequired) — сервис не
+# должен незаметно стартовать с общеизвестными дефолтами вроде "guest:guest".
+# Если развернуть этот чарт как есть, голым `helm install` без -f, приложение
+# получит пустые DB_PASSWORD/S3_ACCESS_KEY/... и сразу упадёт при старте
+# с понятной ошибкой ("required environment variable ... is not set") —
+# вместо того чтобы тихо подключиться к чужому Postgres/MinIO/RabbitMQ
+# с учётными данными по умолчанию. Реальные значения — только через
+# -f values-dev.yaml/values-prod.yaml или --set в момент деплоя, никогда
+# не в этом файле (он коммитится в git).
+secrets:
+  create: true
+  # dbUser — не в getEnvRequired (см. internal/config.Load()), у него есть
+  # безопасный дефолт в самом коде ("gophprofile"), поэтому здесь оставлен
+  # реальным значением, а не пустой строкой — падать fail-fast имеет смысл
+  # только там, где дефолт был бы небезопасным.
+  dbUser: gophprofile
+  dbPassword: ""
+  s3AccessKey: ""
+  s3SecretKey: ""
+  rabbitmqURL: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  # Наш код ни разу не обращается к Kubernetes API (не читает ConfigMap/Secret
+  # программно, не создаёт объекты) — ему в принципе не нужен токен для
+  # аутентификации в API-сервере. automount отключен по умолчанию: это
+  # строже, чем просто "дать Role с пустыми правами" — токена нет вообще,
+  # significantly уменьшает, чем можно воспользоваться, если под скомпрометируют.
+  automountServiceAccountToken: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+networkPolicy:
+  enabled: true
+  # Неймспейсы, из которых разрешён входящий трафик — у ingress-controller
+  # (nginx) и у Prometheus почти всегда обе есть предсказуемые имена
+  # неймспейсов, но если у тебя иначе — поправь под свой кластер.
+  ingressNamespace: ingress-nginx
+  monitoringNamespace: monitoring
+  # Порты зависимостей (Postgres/RabbitMQ/MinIO/Jaeger-OTLP), на которые
+  # разрешается исходящий трафик с server/worker — куда угодно, но только
+  # на эти порты (см. подробный комментарий в templates/networkpolicy.yaml).
+  dependencyPorts: [5432, 5672, 9000, 4317]
+
+serviceMonitor:
+  # По умолчанию выключен: ServiceMonitor — это CRD, которого не существует
+  # в кластере, пока не установлен Prometheus Operator (например, через чарт
+  # kube-prometheus-stack). Если включить это на кластере без Operator'а,
+  # `helm install` упадёт с ошибкой "no matches for kind ServiceMonitor".
+  enabled: false
+  interval: 30s
+  # Дополнительные лейблы поверх стандартных — некоторые установки
+  # Prometheus Operator донастраивают выбор ServiceMonitor'ов не только по
+  # namespace, но и по конкретному лейблу (например, release: prometheus) —
+  # уточни у того, кто ставил kube-prometheus-stack в твоём кластере.
+  labels: {}
+
+migration:
+  enabled: true
+  # Без этого лимита, если БД во время апгрейда окажется недоступна, Job
+  # будет ретраить контейнер до исчерпания backoffLimit (см. job-migrate.yaml)
+  # с экспоненциальными паузами — это может растянуться на минуты, и всё
+  # это время `helm upgrade` висит заблокированным в ожидании pre-upgrade
+  # хука. activeDeadlineSeconds — жёсткий потолок по времени на весь Job:
+  # если он истёк, Kubernetes сам завершает Job с ошибкой, Helm фиксирует
+  # неудачу хука и НЕ выкатывает новые Deployment'ы поверх немигрированной
+  # схемы — именно то поведение, которое нужно.
+  activeDeadlineSeconds: 90
