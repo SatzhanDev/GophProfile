@@ -11,6 +11,18 @@ metadata:
   {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  # Без этой секции контроллер nginx не будет знать, на каком порту
+  # слушать HTTPS и из какого Secret брать сертификат — даже если
+  # cert-manager (через аннотацию cluster-issuer выше) успешно его выпустит.
+  # secretName сюда же передаёт cert-manager'у ingress-shim: увидев именно
+  # эту комбинацию (аннотация + tls.secretName), он сам создаст Certificate
+  # и наполнит указанный Secret — вручную заводить его не нужно.
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
   rules:
     - host: {{ .Values.ingress.host | quote }}
       http:

@@ -33,8 +33,15 @@ ingress:
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     # Пример для cert-manager, если TLS выпускается им — сам по себе
-    # cert-manager этот чарт тоже не разворачивает.
+    # cert-manager этот чарт тоже не разворачивает, только просит его
+    # выписать сертификат через эту аннотацию.
     cert-manager.io/cluster-issuer: letsencrypt-prod
+  # tls.enabled обязателен ВМЕСТЕ с аннотацией выше — одна аннотация
+  # cluster-issuer, без секции spec.tls в самом Ingress, HTTPS не включает
+  # (см. подробный комментарий в k8s/templates/ingress.yaml).
+  tls:
+    enabled: true
+    secretName: gophprofile-tls
 
 networkPolicy:
   enabled: true

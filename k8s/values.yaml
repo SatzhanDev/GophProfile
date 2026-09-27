@@ -70,6 +70,20 @@ ingress:
   host: gophprofile.local
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+  tls:
+    # Выключено по умолчанию: локальный кластер (Rancher Desktop) обычно
+    # без cert-manager и без реального DNS-имени, самоподписанный
+    # сертификат под "gophprofile.local" никакой пользы не принесёт.
+    # Аннотация cert-manager.io/cluster-issuer сама по себе HTTPS не
+    # включает — она только просит cert-manager выписать сертификат;
+    # без spec.tls в самом Ingress nginx-controller не знает, на каком
+    # порту слушать HTTPS и из какого Secret брать сертификат. Включай
+    # tls.enabled вместе с этой аннотацией одновременно, порознь толку нет.
+    enabled: false
+    # secretName — куда cert-manager (через ingress-shim, следящий за
+    # аннотацией cluster-issuer) сам положит выпущенный сертификат;
+    # секрет заранее создавать не нужно, cert-manager создаст его сам.
+    secretName: gophprofile-tls
 
 # --- Несекретный конфиг (уходит в ConfigMap) ---
 # Соответствует internal/config.Config — все переменные, которые НЕ
@@ -104,18 +118,27 @@ config:
   otelExporterEndpoint: "jaeger-collector.observability.svc.cluster.local:4317"
 
 # --- Секреты (уходят в Secret) ---
-# ВНИМАНИЕ: значения ниже — заглушки для локального стенда (Rancher
-# Desktop). В реальном проде values.yaml с паролями в git не хранят —
-# либо секрет создаётся заранее вручную/через CI и сюда ставится
-# secrets.create: false, либо используется внешний источник секретов
-# (External Secrets Operator, Sealed Secrets, HashiCorp Vault).
+# Пустые строки — НЕ забытые заглушки, а осознанный fail-fast: то же самое
+# решение, что и в internal/config.Load() (getEnvRequired) — сервис не
+# должен незаметно стартовать с общеизвестными дефолтами вроде "guest:guest".
+# Если развернуть этот чарт как есть, голым `helm install` без -f, приложение
+# получит пустые DB_PASSWORD/S3_ACCESS_KEY/... и сразу упадёт при старте
+# с понятной ошибкой ("required environment variable ... is not set") —
+# вместо того чтобы тихо подключиться к чужому Postgres/MinIO/RabbitMQ
+# с учётными данными по умолчанию. Реальные значения — только через
+# -f values-dev.yaml/values-prod.yaml или --set в момент деплоя, никогда
+# не в этом файле (он коммитится в git).
 secrets:
   create: true
+  # dbUser — не в getEnvRequired (см. internal/config.Load()), у него есть
+  # безопасный дефолт в самом коде ("gophprofile"), поэтому здесь оставлен
+  # реальным значением, а не пустой строкой — падать fail-fast имеет смысл
+  # только там, где дефолт был бы небезопасным.
   dbUser: gophprofile
-  dbPassword: "change-me"
-  s3AccessKey: "change-me"
-  s3SecretKey: "change-me"
-  rabbitmqURL: "amqp://guest:guest@rabbitmq:5672/"
+  dbPassword: ""
+  s3AccessKey: ""
+  s3SecretKey: ""
+  rabbitmqURL: ""
 
 serviceAccount:
   create: true
@@ -166,3 +189,12 @@ serviceMonitor:
 
 migration:
   enabled: true
+  # Без этого лимита, если БД во время апгрейда окажется недоступна, Job
+  # будет ретраить контейнер до исчерпания backoffLimit (см. job-migrate.yaml)
+  # с экспоненциальными паузами — это может растянуться на минуты, и всё
+  # это время `helm upgrade` висит заблокированным в ожидании pre-upgrade
+  # хука. activeDeadlineSeconds — жёсткий потолок по времени на весь Job:
+  # если он истёк, Kubernetes сам завершает Job с ошибкой, Helm фиксирует
+  # неудачу хука и НЕ выкатывает новые Deployment'ы поверх немигрированной
+  # схемы — именно то поведение, которое нужно.
+  activeDeadlineSeconds: 90

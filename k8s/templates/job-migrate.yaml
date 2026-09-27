@@ -33,6 +33,15 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 2
+  # Жёсткий потолок по времени на весь Job (все попытки суммарно), а не
+  # только на один контейнер: без него, если БД во время апгрейда недоступна,
+  # Job ретраит с экспоненциальными паузами до исчерпания backoffLimit, и
+  # всё это время `helm upgrade` висит заблокированным в ожидании хука —
+  # в проде это гарантированный затянувшийся инцидент. При превышении
+  # дедлайна Kubernetes сам завершает Job ошибкой, Helm фиксирует неудачу
+  # pre-upgrade хука и НЕ выкатывает новые Deployment'ы поверх
+  # несмигрированной схемы.
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
   template:
     metadata:
       labels:
